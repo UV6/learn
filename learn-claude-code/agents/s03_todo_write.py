@@ -163,11 +163,7 @@ TOOLS = [
 def agent_loop(messages: list):
     rounds_since_todo = 0
     while True:
-        # Nag reminder: if 3+ rounds without a todo update, inject reminder
-        if rounds_since_todo >= 3 and messages:
-            last = messages[-1]
-            if last["role"] == "user" and isinstance(last.get("content"), list):
-                last["content"].insert(0, {"type": "text", "text": "<reminder>Update your todos.</reminder>"})
+        # Nag reminder is injected below, alongside tool results
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
@@ -189,6 +185,8 @@ def agent_loop(messages: list):
                 if block.name == "todo":
                     used_todo = True
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+        if rounds_since_todo >= 3:
+            results.insert(0, {"type": "text", "text": "<reminder>Update your todos.</reminder>"})
         messages.append({"role": "user", "content": results})
 
 

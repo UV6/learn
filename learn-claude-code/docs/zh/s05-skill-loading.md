@@ -33,24 +33,27 @@ When model calls load_skill("git"):
 
 ## 工作原理
 
-1. 技能文件以 Markdown 格式存放在 `.skills/`, 带 YAML frontmatter。
+1. 每个技能是一个目录, 包含 `SKILL.md` 文件和 YAML frontmatter。
 
 ```
-.skills/
-  git.md       # ---\n description: Git workflow\n ---\n ...
-  test.md      # ---\n description: Testing patterns\n ---\n ...
+skills/
+  pdf/
+    SKILL.md       # ---\n name: pdf\n description: Process PDF files\n ---\n ...
+  code-review/
+    SKILL.md       # ---\n name: code-review\n description: Review code\n ---\n ...
 ```
 
-2. SkillLoader 解析 frontmatter, 分离元数据和正文。
+2. SkillLoader 递归扫描 `SKILL.md` 文件, 用目录名作为技能标识。
 
 ```python
 class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills = {}
-        for f in sorted(skills_dir.glob("*.md")):
+        for f in sorted(skills_dir.rglob("SKILL.md")):
             text = f.read_text()
             meta, body = self._parse_frontmatter(text)
-            self.skills[f.stem] = {"meta": meta, "body": body}
+            name = meta.get("name", f.parent.name)
+            self.skills[name] = {"meta": meta, "body": body}
 
     def get_descriptions(self) -> str:
         lines = []
@@ -87,7 +90,7 @@ TOOL_HANDLERS = {
 |----------------|------------------|--------------------------------|
 | Tools          | 5 (基础 + task)  | 5 (基础 + load_skill)          |
 | 系统提示       | 静态字符串       | + 技能描述列表                 |
-| 知识库         | 无               | .skills/*.md 文件              |
+| 知识库         | 无               | skills/\*/SKILL.md 文件        |
 | 注入方式       | 无               | 两层 (系统提示 + result)       |
 
 ## 试一试

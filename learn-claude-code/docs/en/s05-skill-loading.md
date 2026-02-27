@@ -33,24 +33,27 @@ Layer 1: skill *names* in system prompt (cheap). Layer 2: full *body* via tool_r
 
 ## How It Works
 
-1. Skill files live in `.skills/` as Markdown with YAML frontmatter.
+1. Each skill is a directory containing a `SKILL.md` with YAML frontmatter.
 
 ```
-.skills/
-  git.md       # ---\n description: Git workflow\n ---\n ...
-  test.md      # ---\n description: Testing patterns\n ---\n ...
+skills/
+  pdf/
+    SKILL.md       # ---\n name: pdf\n description: Process PDF files\n ---\n ...
+  code-review/
+    SKILL.md       # ---\n name: code-review\n description: Review code\n ---\n ...
 ```
 
-2. SkillLoader parses frontmatter, separates metadata from body.
+2. SkillLoader scans for `SKILL.md` files, uses the directory name as the skill identifier.
 
 ```python
 class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills = {}
-        for f in sorted(skills_dir.glob("*.md")):
+        for f in sorted(skills_dir.rglob("SKILL.md")):
             text = f.read_text()
             meta, body = self._parse_frontmatter(text)
-            self.skills[f.stem] = {"meta": meta, "body": body}
+            name = meta.get("name", f.parent.name)
+            self.skills[name] = {"meta": meta, "body": body}
 
     def get_descriptions(self) -> str:
         lines = []
@@ -87,7 +90,7 @@ The model learns what skills exist (cheap) and loads them when relevant (expensi
 |----------------|------------------|----------------------------|
 | Tools          | 5 (base + task)  | 5 (base + load_skill)      |
 | System prompt  | Static string    | + skill descriptions       |
-| Knowledge      | None             | .skills/*.md files         |
+| Knowledge      | None             | skills/\*/SKILL.md files   |
 | Injection      | None             | Two-layer (system + result)|
 
 ## Try It
