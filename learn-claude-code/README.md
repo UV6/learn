@@ -1,5 +1,5 @@
 # Learn Claude Code -- A nano Claude Code-like agent, built from 0 to 1
-
+fellow on X: [shareAI-Lab](https://x.com/baicai003)  
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
 ```
