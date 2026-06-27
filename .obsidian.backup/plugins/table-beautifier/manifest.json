@@ -1,0 +1,9 @@
+{
+  "id": "table-beautifier",
+  "name": "Table Beautifier",
+  "version": "1.0.1",
+  "minAppVersion": "1.4.0",
+  "description": "Converts ASCII/Unicode box-drawing tables into Markdown tables",
+  "author": "Vesa Vänskä",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001 — Hello Agent: 从零构建第一个 LangChain Agent</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0001: Hello Agent</h1>
+<p class="lesson-meta">2026-06-26 · 预计时间 30 分钟 · 难度：入门</p>
+
+<blockquote>
+  本课目标：安装 LangChain 环境，理解 Agent 是什么，用 <code>create_agent</code> 构建第一个能调用工具的智能代理。
+</blockquote>
+
+<h2>1. Agent 是什么？</h2>
+
+<p>面试时最常见的第一个问题：「什么是 Agent？它和普通的 LLM 调用有什么区别？」</p>
+
+<p>简单说：</p>
+<ul>
+  <li><strong>普通 LLM 调用</strong>：用户提问 → 模型回答。模型只能「说话」，不能「做事」。</li>
+  <li><strong>Agent</strong>：用户提问 → 模型思考 → 决定调用哪个工具 → 观察工具结果 → 继续思考 → 最终回答。模型既能「说话」也能「做事」。</li>
+</ul>
+
+<p>Agent 的核心循环（面试必背）：</p>
+<pre><code>用户输入 → LLM 推理 → 需要工具？→ 是 → 调用工具 → 获取结果 → LLM 再次推理
+                    → 否 → 生成最终回答</code></pre>
+
+<div class="callout">
+  <strong>面试要点：</strong>Agent = LLM + Tools + Orchestration Loop。LangChain 的 <code>create_agent()</code> 帮你封装好了这个循环。
+</div>
+
+<h2>2. 环境搭建</h2>
+
+<p>先确保 Python 3.10+ 已安装：</p>
+<pre><code>python --version  # 应该 ≥ 3.10</code></pre>
+
+<p>创建项目并安装依赖：</p>
+<pre><code># 创建项目目录
+mkdir hello-agent && cd hello-agent
+
+# 创建虚拟环境
+python -m venv .venv
+source .venv/bin/activate  # Mac/Linux
+# .venv\Scripts\activate   # Windows
+
+# 安装核心依赖
+pip install langchain langchain-openai python-dotenv
+
+# 如果你用其他模型提供商，也安装对应的包
+# Anthropic: pip install langchain-anthropic
+# Google:    pip install langchain-google-genai</code></pre>
+
+<p>设置 API Key。创建 <code>.env</code> 文件：</p>
+<pre><code># .env
+OPENAI_API_KEY=sk-your-key-here
+# 或者
+# ANTHROPIC_API_KEY=sk-ant-your-key-here</code></pre>
+
+<h2>3. 第一个 Agent：天气预报助手</h2>
+
+<p>我们将创建一个 Agent，它能调用 <code>get_weather</code> 工具来回答天气查询。</p>
+
+<p>创建 <code>agent.py</code>：</p>
+<pre><code>import os
+from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain.chat_models import init_chat_model
+
+load_dotenv()
+
+# Step 1: 定义一个工具（Tool）
+# 工具就是普通的 Python 函数 + type hints + docstring
+def get_weather(city: str) -> str:
+    """Get the current weather for a given city.
+
+    Args:
+        city: The name of the city to get weather for.
+    """
+    # 实际项目中，这里会调用天气 API
+    # 现在我们用模拟数据
+    weather_data = {
+        "beijing": "晴朗，25°C，湿度 40%",
+        "shanghai": "多云，28°C，湿度 65%",
+        "tokyo": "小雨，22°C，湿度 80%",
+    }
+    return weather_data.get(city.lower(), f"找不到 {city} 的天气数据")
+
+# Step 2: 初始化模型
+model = init_chat_model(
+    "gpt-4o-mini",  # 便宜够用；也可以用 "claude-sonnet-4-6"
+    temperature=0,
+)
+
+# Step 3: 创建 Agent
+agent = create_agent(
+    model=model,
+    tools=[get_weather],  # 把手头的工具交给 Agent
+    system_prompt="你是一个友好的天气助手。用中文回答用户的问题。",
+)
+
+# Step 4: 运行 Agent
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "北京今天天气怎么样？"}]}
+)
+
+# Step 5: 查看结果
+print("=== Agent 完整消息历史 ===")
+for msg in result["messages"]:
+    print(f"[{msg.type}] {msg.content[:200]}...")
+</code></pre>
+
+<p>运行它：</p>
+<pre><code>python agent.py</code></pre>
+
+<p>你会看到类似这样的输出：</p>
+<pre><code>=== Agent 完整消息历史 ===
+[human] 北京今天天气怎么样？...
+[ai] ...
+[tool] 晴朗，25°C，湿度 40%...
+[ai] 北京今天天气晴朗，温度 25°C，湿度 40%，是个不错的天...</code></pre>
+
+<h2>4. 发生了什么？</h2>
+
+<p>当你调用 <code>agent.invoke()</code> 时，LangChain 在背后执行了 Agent Loop：</p>
+
+<ol>
+  <li><strong>human 消息</strong> — 用户输入「北京今天天气怎么样？」</li>
+  <li><strong>LLM 推理</strong> — 模型看到有 <code>get_weather</code> 工具可用，判断需要调用它，返回 tool_call</li>
+  <li><strong>Tool 执行</strong> — LangChain 自动调用 <code>get_weather("beijing")</code>，结果返回「晴朗，25°C」</li>
+  <li><strong>LLM 再次推理</strong> — 模型拿到工具结果，生成自然的回答</li>
+</ol>
+
+<div class="callout tip">
+  <strong>关键理解：</strong>你不需要写任何循环逻辑！<code>create_agent()</code> 自动处理了「调用工具 → 拿结果 → 再推理」的循环。这是 LangChain Agent 的核心价值。
+</div>
+
+<h2>5. 面试常见追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>Tool 的定义需要什么？</td>
+    <td>函数名 + type hints（参数类型）+ docstring（描述工具用途）。LLM 通过这些来决定何时调用、传什么参数。</td>
+  </tr>
+  <tr>
+    <td>Agent 怎么知道调用哪个工具？</td>
+    <td>LLM 根据工具的描述（docstring）和参数类型自动判断。这就是 Function Calling 机制。</td>
+  </tr>
+  <tr>
+    <td>Agent 会无限循环调用工具吗？</td>
+    <td>不会。LangChain 有最大迭代次数限制（默认），当 LLM 认为不需要工具时直接返回结果。</td>
+  </tr>
+</table>
+
+<h2>6. 动手练习</h2>
+
+<div class="practice">
+  <h3>🛠 练习：扩展你的 Agent</h3>
+  <ol>
+    <li>添加第二个工具 <code>get_time(city: str) -> str</code>，返回城市当前时间（用模拟数据）</li>
+    <li>修改 system_prompt，让 Agent 优先尝试调用工具获取实时数据再回答</li>
+    <li>观察：当你问一个不需要工具的问题（如「你好，你是谁？」）时，Agent 的消息历史中是否还有 tool_call？</li>
+  </ol>
+</div>
+
+<h2>7. 关键 API 速记</h2>
+
+<table>
+  <tr><th>API</th><th>用途</th></tr>
+  <tr><td><code>create_agent(model, tools, system_prompt)</code></td><td>创建 Agent 的最简方法</td></tr>
+  <tr><td><code>agent.invoke({"messages": [...]})</code></td><td>运行 Agent，返回完整消息历史</td></tr>
+  <tr><td><code>init_chat_model(name, temperature)</code></td><td>统一模型初始化（支持 OpenAI/Anthropic/Google 等）</td></tr>
+  <tr><td><code>agent.stream(...)</code></td><td>流式运行 Agent（下一课讲）</td></tr>
+</table>
+
+<h2>8. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/quickstart">LangChain Quickstart — 官方示例</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/agents">LangChain Agents 概念文档</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>你的 Codia AI 助教随时可以回答关于本课任何内容的追问，包括代码调试、概念澄清、面试模拟。
+</div>
+
+<div class="nav">
+  <span></span>
+  <a href="0002-rag-pipeline.html">下一课：RAG 全流程 →</a>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,263 @@
+{
+  "main": {
+    "id": "24532be435fbaf85",
+    "type": "split",
+    "children": [
+      {
+        "id": "12fc441c90a3d300",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "bf86638cb9534193",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "learn-claude-code/s07_skill_loading/README.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "README"
+            }
+          },
+          {
+            "id": "6fba85351d8b28f0",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "learn-claude-code/s05_todo_write/README.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "README"
+            }
+          },
+          {
+            "id": "2fe325309da8cb2a",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "learn-claude-code/s03_permission/README.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "README"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "70861a831a810645",
+    "type": "split",
+    "children": [
+      {
+        "id": "ecac70ef1a77e238",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "57084402556ec06c",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "文件列表"
+            }
+          },
+          {
+            "id": "a4cc89a18ba91ad9",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "搜索"
+            }
+          },
+          {
+            "id": "0c7278e55f9264c8",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "书签"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "7a4d8750bce9a741",
+    "type": "split",
+    "children": [
+      {
+        "id": "551c528684bc3b98",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1b80f9f00dfe674c",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "learn-claude-code/s08_context_compact/README.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "README 的反向链接列表"
+            }
+          },
+          {
+            "id": "56d26d51e45a7a20",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "learn-claude-code/s08_context_compact/README.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "README 的出链列表"
+            }
+          },
+          {
+            "id": "8d706c60471f856e",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "标签"
+            }
+          },
+          {
+            "id": "a9083c7763f7c3d8",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "添加笔记属性"
+            }
+          },
+          {
+            "id": "87580a84fa4fab56",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "learn-claude-code/s08_context_compact/README.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "README 的大纲"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:打开快速切换": false,
+      "graph:查看关系图谱": false,
+      "canvas:新建白板": false,
+      "daily-notes:打开/创建今天的日记": false,
+      "templates:插入模板": false,
+      "command-palette:打开命令面板": false,
+      "bases:新建数据库": false
+    }
+  },
+  "active": "bf86638cb9534193",
+  "lastOpenFiles": [
+    "learn-claude-code/s03_permission/README.md",
+    "Codia/c1 对话/imgs/Pasted image 20260610000506.png",
+    "Codia/c1 对话/imgs",
+    "Codia/未命名 1.base",
+    "Codia/未命名.base",
+    "Codia/2026-06-10.md",
+    "Codia/未命名.canvas",
+    "Codia/c2 工具/imgs/Pasted image 20260610000122.png",
+    "Codia/c2 工具/imgs/Pasted image 20260610000020.png",
+    "Codia/c2 工具/imgs/Pasted image 20260609235959.png",
+    "Codia/c2 工具/imgs/Pasted image 20260609235944.png",
+    "Codia/c2 工具/imgs",
+    "Codia/images",
+    "Codia/未命名",
+    "Codia/c2 工具/工具.md",
+    "Codia/c2 工具",
+    "Codia/c1 对话/遇到的问题.md",
+    "Codia/c1 对话/day1.md",
+    "Codia/c1 对话",
+    "Codia/c1/遇到的问题.md",
+    "Codia/c1/day1.md",
+    "Codia/prompt/c2.md",
+    "Codia/prompt/c1.md",
+    "Codia/prompt/c0.md",
+    "Codia/c2/工具.md",
+    "Codia/c1",
+    "Codia/prompt",
+    "Codia/Pasted image 20260609164652.png",
+    "Codia/Pasted image 20260609164554.png",
+    "Codia/Pasted image 20260609164504.png",
+    "Codia/Pasted image 20260609164329.png",
+    "MewCode/c1/遇到的问题.md",
+    "MewCode/c1/day1.md",
+    "MewCode/Pasted image 20260609164652.png",
+    "claude 笔记/13 组件挂载位置.md",
+    "claude 笔记/11 WorkTree.md",
+    "MewCode/c2/工具.md",
+    "MewCode/c2/个旅居.md",
+    "MewCode/c2/未命名.md",
+    "MewCode/prompt/c2.md",
+    "MewCode/prompt/未命名.md",
+    "MewCode/prompt/c1.md",
+    "MewCode/prompt/c0.md",
+    "MewCode/c1/未命名.md",
+    "claude 笔记/12 rules.md",
+    "claude 笔记/0指令拆解.md"
+  ]
+}
