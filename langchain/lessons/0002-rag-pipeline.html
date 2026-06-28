@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002 — RAG 全流程：从文档到智能问答</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0002: RAG 全流程</h1>
+<p class="lesson-meta">2026-06-28 · 预计时间 30 分钟 · 难度：中级</p>
+
+<blockquote>
+  本课目标：理解 RAG（检索增强生成）的完整链路，用 LangChain 搭建文档加载 → 切片 → 向量化 → 检索 → 生成的端到端管道。
+</blockquote>
+
+<h2>1. 为什么需要 RAG？</h2>
+
+<p>面试高频开场题：「你为什么要用 RAG？」</p>
+
+<p>LLM 有两个硬伤：</p>
+<ul>
+  <li><strong>知识截止：</strong>训练数据停在某个时间点，不知道之后的事</li>
+  <li><strong>幻觉：</strong>遇到不知道的会编造答案，而不是说「我不知道」</li>
+  <li><strong>私有知识：</strong>不知道你公司的内部文档、产品手册、代码库</li>
+</ul>
+
+<p>RAG 的解决思路：<strong>先检索相关上下文，再让 LLM 基于上下文回答。</strong></p>
+
+<div class="callout">
+  <strong>面试标准答案：</strong>RAG = Retrieval（检索） + Augmented（增强） + Generation（生成）。核心思想是：把外部知识注入到 LLM 的 context window 中，让模型基于实际文档回答，而非依赖训练记忆。这既解决了知识截止问题，也显著降低了幻觉。
+</div>
+
+<h2>2. RAG 的五个环节</h2>
+
+<p>RAG 分为离线索引阶段（Indexing）和在线查询阶段（Query）：</p>
+
+<pre><code>┌───────────── Indexing (离线) ─────────────┐
+│                                              │
+│  文档 ──→ Load ──→ Split ──→ Embed ──→ Store │
+│                                              │
+└──────────────────────────────────────────────┘
+
+┌─────── Query (在线) ───────┐
+│                              │
+│  问题 ──→ Embed ──→ Retrieve │
+│                    ↓         │
+│              Context + Prompt│
+│                    ↓         │
+│              LLM → Answer    │
+│                              │
+└──────────────────────────────┘</code></pre>
+
+<p>五个环节对应五个 LangChain 组件：</p>
+<ol>
+  <li><strong>Document Loader</strong> — 加载各种格式的文件（PDF、TXT、网页、数据库…）</li>
+  <li><strong>Text Splitter</strong> — 把长文档切成小块（chunk），控制大小和重叠</li>
+  <li><strong>Embedding Model</strong> — 把文本变成向量（数字），语义相似的文本向量也相近</li>
+  <li><strong>Vector Store</strong> — 存储和检索向量（ChromaDB、FAISS、Pinecone…）</li>
+  <li><strong>Retrieval Chain</strong> — 接收问题 → 检索相关文档 → 拼入 prompt → LLM 回答</li>
+</ol>
+
+<h2>3. 动手：构建知识库问答</h2>
+
+<h3>3.1 准备数据</h3>
+
+<p>先用一个简单的文本文件作为知识库。创建一个 <code>knowledge.txt</code>：</p>
+
+<pre><code># 公司产品手册 v3.2
+
+## CloudSync Pro
+CloudSync Pro 是公司旗舰云同步产品，支持跨平台文件同步。
+定价：$19/月（个人版），$49/月（团队版，最多 10 人）。
+个人版支持 3 台设备，团队版无限设备。
+
+## DataGuard
+DataGuard 是数据安全套件，提供端到端加密和零信任架构。
+定价：$29/月，包含自动备份和勒索软件防护。
+
+## 技术栈
+后端：Go + PostgreSQL + Redis
+前端：React + TypeScript
+部署：Kubernetes on AWS
+API 网关：Kong</code></pre>
+
+<h3>3.2 安装依赖</h3>
+
+<pre><code># 使用本地 embedding（无需 API Key）
+pip install langchain langchain-community \
+    faiss-cpu \
+    sentence-transformers \
+    pypdf  # 如需处理 PDF</code></pre>
+
+<h3>3.3 完整代码</h3>
+
+<p>创建 <code>rag.py</code>：</p>
+
+<pre><code>import os
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain_community.document_loaders import TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
+
+load_dotenv()
+
+# ===== 离线阶段：构建索引 =====
+
+# 1. Load — 加载文档
+loader = TextLoader("knowledge.txt", encoding="utf-8")
+docs = loader.load()
+print(f"Loaded {len(docs)} document(s)")
+
+# 2. Split — 切分成小块
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=200,       # 每块最大字符数
+    chunk_overlap=40,     # 重叠字符数（避免截断上下文）
+    separators=["\n\n", "\n", "。", ".", " "],  # 优先按段落切
+)
+chunks = text_splitter.split_documents(docs)
+print(f"Split into {len(chunks)} chunks")
+
+# 3. Embed + 4. Store — 向量化并存入向量库
+embeddings = HuggingFaceEmbeddings(
+    model_name="BAAI/bge-small-zh-v1.5",  # 中英文都支持的轻量模型
+)
+vectorstore = FAISS.from_documents(chunks, embeddings)
+print("Vector store ready!")
+
+# ===== 在线阶段：查询 =====
+
+# 5. 设置 retriever
+retriever = vectorstore.as_retriever(
+    search_kwargs={"k": 3}  # 每次检索返回最相关的 3 个文档块
+)
+
+# 6. 初始化模型
+model = init_chat_model(
+    "openai:deepseek-chat",
+    temperature=0,
+    openai_api_key=os.environ["DEEPSEEK_API_KEY"],
+    openai_api_base=os.environ["DEEPSEEK_BASE_URL"],
+)
+
+# 7. 构建 RAG prompt
+system_prompt = """Use the following context to answer the question.
+If you don't know the answer based on the context, just say you don't know.
+Keep your answer concise.
+
+Context:
+{context}"""
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "{input}"),
+])
+
+# 8. 创建 RAG chain
+# step A: 把检索到的文档拼进 prompt
+combine_docs_chain = create_stuff_documents_chain(model, prompt)
+# step B: 先检索再拼接
+rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
+
+# 9. 提问
+questions = [
+    "CloudSync Pro 个人版多少钱？",
+    "DataGuard 支持什么安全特性？",
+    "公司后端用什么技术栈？",
+    "创始人是谁？",  # 知识库没有的信息
+]
+
+for q in questions:
+    print(f"\n{'='*50}")
+    print(f"Q: {q}")
+    result = rag_chain.invoke({"input": q})
+    print(f"A: {result['answer']}")
+    # 可以看到检索了哪些文档块
+    print(f"\n[Sources used: {len(result['context'])} chunks]")</code></pre>
+
+<h2>4. 核心概念拆解</h2>
+
+<h3>4.1 Text Splitter 的参数</h3>
+
+<table>
+  <tr><th>参数</th><th>含义</th><th>面试考啥？</th></tr>
+  <tr>
+    <td><code>chunk_size</code></td>
+    <td>每块最大长度（字符数）</td>
+    <td>太小丢失上下文，太大检索不准。经验值 200-1000，调参实验。</td>
+  </tr>
+  <tr>
+    <td><code>chunk_overlap</code></td>
+    <td>相邻块的重叠长度</td>
+    <td>防止关键信息恰好被切断。通常设为 chunk_size 的 10-20%。</td>
+  </tr>
+  <tr>
+    <td><code>separators</code></td>
+    <td>切分优先级</td>
+    <td>RecursiveCharacterTextSplitter 按此顺序尝试切分，先段落，再句子，再空格。</td>
+  </tr>
+</table>
+
+<div class="callout tip">
+  <strong>实践建议：</strong>没有"完美"的 chunk 参数。不同文档类型需要不同策略。代码文档可能要 <code>separators=["\n\n", "\n", ". "]</code>，法律文档可能要更大的 <code>chunk_size</code>。面试时提到"需要根据文档类型和下游任务做实验调参"就能加分。
+</div>
+
+<h3>4.2 Embedding 的本质</h3>
+
+<p>Embedding 就是把一段文本映射为一个高维向量（比如 384 维的浮点数数组）。</p>
+
+<p>关键性质：<strong>语义越相近的文本，向量之间的距离越近。</strong></p>
+
+<ul>
+  <li>"今天天气真好" 和 "阳光明媚的一天" → 向量距离近 ✓</li>
+  <li>"今天天气真好" 和 "数据库查询语句" → 向量距离远 ✓</li>
+</ul>
+
+<p>这就是为什么我们能用「北京的天气怎么样？」作为查询，检索出包含「晴朗，25°C」的文档块——虽然字面上没有重叠，但语义接近。</p>
+
+<h3>4.3 Vector Store 选型</h3>
+
+<table>
+  <tr><th>场景</th><th>推荐</th><th>备注</th></tr>
+  <tr><td>本地开发/原型</td><td>ChromaDB / FAISS</td><td>零配置，内存/本地文件</td></tr>
+  <tr><td>中等规模生产</td><td>Pinecone / Qdrant</td><td>云托管，高性能</td></tr>
+  <tr><td>已有 PostgreSQL</td><td>pgvector</td><td>复用现有 DB，减少架构复杂度</td></tr>
+  <tr><td>企业级（百万+文档）</td><td>Elasticsearch / Milvus</td><td>分布式的，混合检索（向量+关键词）</td></tr>
+</table>
+
+<h2>5. 面试常见追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>RAG 和 Fine-tuning 的区别？</td>
+    <td>RAG 是给模型外挂知识库，不改模型权重；Fine-tuning 是修改模型权重注入知识。RAG 知识可随时更新、可追溯来源；Fine-tuning 知识内化但无法追溯。实际项目中常常结合使用。</td>
+  </tr>
+  <tr>
+    <td>怎么评估 RAG 的效果？</td>
+    <td>两个维度：(1) Retrieval 质量—命中率、MRR；(2) Generation 质量—基于上下文的忠实度（faithfulness）和答案相关性。常用 RAGAS 评估框架。</td>
+  </tr>
+  <tr>
+    <td>检索不准怎么办？</td>
+    <td>按顺序排查：chunk 大小不合适 → 试试不同 embedding 模型 → 加 reranker 对检索结果精排 → 混合检索（BM25+向量）→ 调整 prompt 让 LLM 更严格地依赖上下文。</td>
+  </tr>
+  <tr>
+    <td>什么时候需要 Reranker？</td>
+    <td>当 embedding 检索不够精确时（通常 k>20 时明显）。Reranker 用交叉编码器对候选文档精排，成本更高但更准。流程：embedding 粗筛 20 条 → reranker 留 5 条 → 给 LLM。</td>
+  </tr>
+  <tr>
+    <td>前端交互中 RAG 怎么处理？</td>
+    <td>可以用 agent.stream() 流式输出，让用户看到逐字生成。同时在前端展示引用的来源文档块，增加可信度。LangChain 的 create_retrieval_chain 返回的 <code>result["context"]</code> 可以直接用来展示引用。</td>
+  </tr>
+</table>
+
+<h2>6. 动手练习</h2>
+
+<div class="practice">
+  <h3>🛠 练习：扩展你的 RAG</h3>
+  <ol>
+    <li>把 knowledge.txt 换成你自己的真实文档（简历、笔记、代码注释都可以），看 RAG 能否回答关于它的内容</li>
+    <li>修改 <code>chunk_size</code> 参数（500, 1000），观察对检索结果的差异</li>
+    <li>把 RAG 包装成一个 Tool，集成到第一课的 Agent 中。这样 Agent 既可以直接回答（有知识），又可以调 RAG 工具（查私有文档）</li>
+    <li>尝试聊天历史：用 <code>create_history_aware_retriever</code> 让检索考虑对话上下文</li>
+  </ol>
+</div>
+
+<h2>7. 关键 API 速记</h2>
+
+<table>
+  <tr><th>API</th><th>用途</th></tr>
+  <tr><td><code>TextLoader(path)</code></td><td>加载纯文本文件</td></tr>
+  <tr><td><code>RecursiveCharacterTextSplitter(chunk_size, chunk_overlap, separators)</code></td><td>智能切分文档</td></tr>
+  <tr><td><code>HuggingFaceEmbeddings(model_name=...)</code></td><td>本地 embedding，无需 API</td></tr>
+  <tr><td><code>FAISS.from_documents(chunks, embeddings)</code></td><td>构建向量索引</td></tr>
+  <tr><td><code>vectorstore.as_retriever(k=N)</code></td><td>从向量库创建检索器</td></tr>
+  <tr><td><code>create_retrieval_chain(retriever, combine_chain)</code></td><td>组装完整 RAG 链路</td></tr>
+</table>
+
+<h2>8. Embedding 模型选择指南</h2>
+
+<table>
+  <tr><th>模型</th><th>维度</th><th>语言</th><th>适用</th></tr>
+  <tr><td><code>BAAI/bge-small-zh-v1.5</code></td><td>512</td><td>中英</td><td>中英文混合场景（推荐）</td></tr>
+  <tr><td><code>BAAI/bge-large-zh-v1.5</code></td><td>1024</td><td>中英</td><td>更高精度，但更慢更大</td></tr>
+  <tr><td><code>all-MiniLM-L6-v2</code></td><td>384</td><td>英文</td><td>轻量，适合纯英文快速原型</td></tr>
+  <tr><td><code>intfloat/multilingual-e5-large</code></td><td>1024</td><td>多语言</td><td>多语言场景</td></tr>
+</table>
+
+<h2>9. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/rag">LangChain RAG 完整教程</a></li>
+  <li><a href="https://huggingface.co/BAAI/bge-small-zh-v1.5">BGE Embedding 模型 — 中文场景首选</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/short-tutorials/rag-with-chroma">RAG with Chroma 示例</a></li>
+  <li><a href="https://github.com/langchain-ai/rag-from-scratch">LangChain RAG from Scratch — 视频+代码系列</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>本课覆盖了 RAG 的全部核心概念和面试考点。如果在代码实现中遇到具体问题，或想深入某个环节（比如 reranker、混合检索、多模态 RAG），随时问你的 Codia AI 助教。
+</div>
+
+<div class="nav">
+  <a href="0001-hello-agent.html">← 第一课：Hello Agent</a>
+  <a href="0003-langgraph-workflow.html">第三课：LangGraph 工作流 →</a>
+</div>
+
+</body>
+</html>

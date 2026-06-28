@@ -20,10 +20,12 @@ def get_weather(city: str) -> str:
     }
     return weather_data.get(city.lower(), f"No weather data for {city}")
 
-# Step 2: Initialize the model
+# Step 2: Initialize the model (DeepSeek via OpenAI-compatible protocol)
 model = init_chat_model(
-    "gpt-4o-mini",
+    "openai:deepseek-chat",
     temperature=0,
+    openai_api_key=os.environ["DEEPSEEK_API_KEY"],
+    openai_api_base=os.environ["DEEPSEEK_BASE_URL"],
 )
 
 # Step 3: Create the agent

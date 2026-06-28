@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0003 — LangGraph 工作流：构建多步骤 Agent</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0003: LangGraph 工作流</h1>
+<p class="lesson-meta">2026-06-28 · 预计时间 40 分钟 · 难度：中级偏高</p>
+
+<blockquote>
+  本课目标：理解 LangGraph 的核心理念，用 StateGraph 构建一个有状态、多步骤、支持条件分支的 Agent 工作流。
+</blockquote>
+
+<h2>1. 为什么需要 LangGraph？</h2>
+
+<p>第一课的 <code>create_agent()</code> 已经很方便了——为什么还要学 LangGraph？</p>
+
+<div class="callout">
+  <strong>一句话：</strong><code>create_agent()</code> 适合"单轮工具调用"场景，LangGraph 适合"多步骤、有状态、有条件分支"的复杂 Agent。
+</div>
+
+<p>具体对比：</p>
+
+<table>
+  <tr><th>场景</th><th><code>create_agent()</code></th><th>LangGraph</th></tr>
+  <tr>
+    <td>问天气 → 调工具 → 回答</td>
+    <td>✅ 完美</td>
+    <td>过度设计</td>
+  </tr>
+  <tr>
+    <td>先搜索 → 如果不满意再搜 → 整合结果</td>
+    <td>❌ 难以控制</td>
+    <td>✅ 天然支持</td>
+  </tr>
+  <tr>
+    <td>A→B→判断→C或D→汇总</td>
+    <td>❌ 不可控</td>
+    <td>✅ 显式定义</td>
+  </tr>
+  <tr>
+    <td>需要暂停等待人工审批</td>
+    <td>❌ 不支持</td>
+    <td>✅ interrupt()</td>
+  </tr>
+  <tr>
+    <td>多 Agent 协作（并行+汇总）</td>
+    <td>❌ 不支持</td>
+    <td>✅ Subgraph</td>
+  </tr>
+</table>
+
+<p>面试时如果你只能说一句：<strong>"LangGraph 把 Agent 逻辑建模为有向图——节点是操作，边是流转，状态在节点间传递。这比 create_agent 的黑盒循环更可控、可调试、可扩展。"</strong></p>
+
+<h2>2. 核心概念：StateGraph</h2>
+
+<p>LangGraph 的三个基础元素：</p>
+
+<pre><code>┌────────────────────────────────────┐
+│           StateGraph                │
+│                                     │
+│   State: 在所有节点间共享的数据      │
+│   Node:  一个执行单元（函数）        │
+│   Edge:  节点间的流转规则            │
+│         · 普通边 (edge):  A → B     │
+│         · 条件边 (conditional):      │
+│           A → 判断 → B 或 C 或 D    │
+│                                     │
+└────────────────────────────────────┘</code></pre>
+
+<p>State 是核心——它承载了整个工作流中积累的信息：用户输入、中间结果、工具调用记录、最终答案。</p>
+
+<div class="callout">
+  <strong>面试要点：</strong>State 是 LangGraph 和普通函数调用的本质区别。每个节点只看到和修改 State，不需要知道前一个节点是谁。这实现了<strong>节点间的解耦</strong>和<strong>工作流的可组合性</strong>。
+</div>
+
+<h2>3. 动手：一个带自检的研究 Agent</h2>
+
+<p>场景：用户提问 → Agent 搜索 → 评估结果是否足够 → 不够就再搜 → 够了就生成答案。</p>
+
+<p>先用流程图理解：</p>
+
+<pre><code>        ┌──────────┐
+        │  START   │
+        └────┬─────┘
+             ↓
+     ┌───────────────┐
+     │  decide:      │
+     │  需要搜索？    │
+     └───┬───────┬───┘
+   不需要 │       │ 需要
+         ↓       ↓
+  ┌──────────┐  ┌──────────────┐
+  │  answer  │  │   search     │
+  │  直接答  │  │   执行搜索    │
+  └──────────┘  └──────┬───────┘
+       │               ↓
+       │       ┌──────────────┐
+       │       │  evaluate    │
+       │       │  信息够了？   │
+       │       └──┬───────┬───┘
+       │      不够│       │够了
+       │       ←──┘       ↓
+       │              ┌──────────┐
+       │              │  answer  │
+       │              │  综合答  │
+       │              └────┬─────┘
+       ↓                   ↓
+       └─────────┬─────────┘
+                 ↓
+           ┌──────────┐
+           │   END    │
+           └──────────┘</code></pre>
+
+<p>创建 <code>research_agent.py</code>：</p>
+
+<pre><code>import os
+from typing import TypedDict, Literal, Annotated
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain_core.messages import HumanMessage, AIMessage
+
+load_dotenv()
+
+# ============================================================
+# Step 1: 定义 State — 工作流的"共享内存"
+# ============================================================
+class ResearchState(TypedDict):
+    messages: Annotated[list, add_messages]  # 完整对话历史
+    question: str                             # 原始问题
+    search_count: int                         # 已搜索次数
+    search_results: list[str]                 # 搜索结果列表
+    final_answer: str                         # 最终答案
+    next_action: str                          # 下一步：search | answer | complete
+
+# ============================================================
+# Step 2: 初始化模型
+# ============================================================
+model = init_chat_model(
+    "openai:deepseek-chat",
+    temperature=0,
+    openai_api_key=os.environ["DEEPSEEK_API_KEY"],
+    openai_api_base=os.environ["DEEPSEEK_BASE_URL"],
+)
+
+# ============================================================
+# Step 3: 定义节点函数 — 每个函数是一个处理步骤
+# ============================================================
+
+def decide_node(state: ResearchState) -> dict:
+    """决策节点：判断是否需要搜索"""
+    question = state["question"]
+
+    # 简单规则判断（实际项目中可用 LLM 判断）
+    needs_search_keywords = ["什么", "怎么", "为什么", "多少", "谁", "哪里", "如何"]
+    needs_search = any(kw in question for kw in needs_search_keywords)
+
+    if needs_search and state["search_count"] == 0:
+        return {"next_action": "search"}
+    elif state["search_count"] >= 3:
+        # 最多搜索 3 次，防止无限循环
+        return {"next_action": "answer"}
+    else:
+        return {"next_action": "answer"}
+
+
+def search_node(state: ResearchState) -> dict:
+    """搜索节点：模拟一次搜索"""
+    question = state["question"]
+    count = state["search_count"] + 1
+
+    # 模拟搜索结果（实际项目调搜索引擎 API）
+    mock_knowledge = {
+        "什么": "LangChain 是一个用于构建 LLM 应用的框架，"
+                "核心抽象包括 Chain、Agent、Tool。"
+                "它支持 Python 和 JavaScript。",
+        "怎么": "使用 LangGraph 构建 Agent 的步骤："
+                "1) 定义 State 2) 定义 Node 函数 "
+                "3) 构建 Graph 4) 编译运行。"
+                "关键是用条件边控制流转。",
+        "为什么": "LangGraph 相比 create_agent() 的优势："
+                "显式状态管理、条件分支、Human-in-the-Loop、"
+                "子图（多Agent协作）。它把 Agent 循环从黑盒变为白盒。",
+    }
+
+    # 匹配关键词获取结果
+    result = ""
+    for key, value in mock_knowledge.items():
+        if key in question:
+            result = value
+            break
+    if not result:
+        result = f"(第{count}次搜索) 未找到相关信息。"
+
+    return {
+        "search_count": count,
+        "search_results": state["search_results"] + [result],
+    }
+
+
+def answer_node(state: ResearchState) -> dict:
+    """回答节点：基于搜索结果生成最终答案"""
+    results = "\n".join(
+        f"- {r}" for r in state["search_results"]
+    ) if state["search_results"] else "（无需搜索，直接回答）"
+
+    prompt = f"""基于以下信息回答用户问题。
+
+用户问题：{state["question"]}
+
+搜索到的信息：
+{results}
+
+请用中文给出准确、简洁的回答。如果信息不足，请诚实说明。
+"""
+
+    response = model.invoke([HumanMessage(content=prompt)])
+    return {"final_answer": response.content}
+
+
+# ============================================================
+# Step 4: 定义路由函数 — 条件边的"判断逻辑"
+# ============================================================
+def route_after_decide(state: ResearchState) -> Literal["search", "answer"]:
+    """决定从 decide 节点去 search 还是 answer"""
+    return state["next_action"]
+
+
+def route_after_evaluate(state: ResearchState) -> Literal["search", "answer"]:
+    """决定从 evaluate 节点去 search（信息不够）还是 answer（够了）"""
+    if state["search_count"] < 2 and state["search_count"] > 0:
+        # 只搜了一次，可能不够，再搜一次
+        return "search"
+    return "answer"
+
+
+# ============================================================
+# Step 5: 构建 Graph
+# ============================================================
+builder = StateGraph(ResearchState)
+
+# 添加节点
+builder.add_node("decide", decide_node)
+builder.add_node("search", search_node)
+builder.add_node("answer", answer_node)
+
+# 添加边
+builder.add_edge(START, "decide")
+
+# 条件边：decide 可能去 search 或 answer
+builder.add_conditional_edges(
+    "decide",
+    route_after_decide,
+    {
+        "search": "search",
+        "answer": "answer",
+    }
+)
+
+# 条件边：search 后评估是否还要继续搜
+builder.add_conditional_edges(
+    "search",
+    route_after_evaluate,
+    {
+        "search": "search",   # 循环回去再搜
+        "answer": "answer",
+    }
+)
+
+builder.add_edge("answer", END)
+
+# 编译
+graph = builder.compile()
+
+# ============================================================
+# Step 6: 运行测试
+# ============================================================
+test_questions = [
+    "什么是 LangChain？",       # 需要搜索
+    "今天天气真好",             # 不需要搜索
+    "为什么用 LangGraph？",     # 需要搜索
+]
+
+for q in test_questions:
+    print(f"\n{'='*60}")
+    print(f"❓ {q}")
+
+    result = graph.invoke({
+        "messages": [],
+        "question": q,
+        "search_count": 0,
+        "search_results": [],
+        "final_answer": "",
+        "next_action": "",
+    })
+
+    print(f"🔍 搜索了 {result['search_count']} 次")
+    print(f"📝 答案：{result['final_answer'][:200]}...")</code></pre>
+
+<h2>4. 代码走读</h2>
+
+<h3>4.1 State 定义</h3>
+
+<p>State 用 <code>TypedDict</code> 定义，<code>Annotated[list, add_messages]</code> 是 LangGraph 的特殊语法——表示 messages 字段不是"覆盖"而是"追加"：</p>
+
+<pre><code>class ResearchState(TypedDict):
+    messages: Annotated[list, add_messages]  # 追加模式
+    question: str                             # 覆盖模式（默认）</code></pre>
+
+<p>面试考点：<strong>"你怎么管理 State 的字段更新策略？"</strong> 答：普通字段默认覆盖，对话消息用 <code>add_messages</code> reducer 做追加。</p>
+
+<h3>4.2 条件边 vs 普通边</h3>
+
+<table>
+  <tr><th>类型</th><th>API</th><th>何时用</th></tr>
+  <tr>
+    <td>普通边</td>
+    <td><code>builder.add_edge(A, B)</code></td>
+    <td>A 完成后一定去 B</td>
+  </tr>
+  <tr>
+    <td>条件边</td>
+    <td><code>builder.add_conditional_edges(A, router, {"x": B, "y": C})</code></td>
+    <td>A 完成后根据 State 决定去哪</td>
+  </tr>
+</table>
+
+<p>router 函数接收 State，返回一个字符串——这个字符串必须匹配 <code>add_conditional_edges</code> 第三个参数中的某个 key。</p>
+
+<h3>4.3 循环控制</h3>
+
+<p>本课代码中 <code>search → evaluate → search → evaluate → ...</code> 形成了循环。LangGraph 不会让这个循环无限运行——它在每次迭代后做判断。你必须自己加终止条件（如 <code>search_count >= 3</code>），否则 LangGraph 有默认的递归上限。</p>
+
+<div class="callout warn">
+  <strong>注意：</strong>LangGraph 的循环是 <strong>同步执行</strong> 的——每次循环都是一个新的 LLM 调用。如果循环次数太多，延迟会线性增长。面试时提到"需要设置合理的递归上限和 token 预算"能加分。
+</div>
+
+<h2>5. 面试高频追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>LangGraph 和 create_agent 什么关系？</td>
+    <td>create_agent 底层就是用 LangGraph 实现的，返回的是一个预配置好的 StateGraph。LangGraph 是引擎，create_agent 是快捷方式。</td>
+  </tr>
+  <tr>
+    <td>State 可以用 Pydantic 吗？</td>
+    <td>可以，推荐用 Pydantic BaseModel 替代 TypedDict（有验证、默认值、序列化支持）。LangGraph 同时支持两种。</td>
+  </tr>
+  <tr>
+    <td>怎么处理并行执行？</td>
+    <td>用 <code>builder.add_node("parallel", [node_a, node_b])</code> 给一个节点传函数列表，LangGraph 并行执行它们，结果合并到 State。</td>
+  </tr>
+  <tr>
+    <td>怎么暂停等待人工？</td>
+    <td>用 <code>interrupt()</code> 函数暂停图执行，等人工确认后用 <code>Command(resume=...)</code> 恢复。这是 LangGraph 的 Human-in-the-Loop 机制。</td>
+  </tr>
+  <tr>
+    <td>Checkpointing 是什么？</td>
+    <td>LangGraph 的"快照机制"。每次状态变更自动保存，支持时间旅行（回到任意历史状态）、错误恢复、人工审批断点续传。用 <code>MemorySaver</code> 或 <code>SqliteSaver</code> 实现。</td>
+  </tr>
+</table>
+
+<h2>6. 动手练习</h2>
+
+<div class="practice">
+  <h3>🛠 练习：扩展你的 Graph</h3>
+  <ol>
+    <li><strong>加一个 evaluate_node：</strong>在 search 和 answer 之间加一个 explicit evaluate 节点，用 LLM 判断搜索结果是否足以回答问题，不够就触发新一轮 search</li>
+    <li><strong>集成第一课的 Tool：</strong>把 weather agent 的 <code>get_weather</code> 工具作为 LangGraph 的一个 node</li>
+    <li><strong>加 Checkpointing：</strong>用 <code>MemorySaver</code> 保存图执行历史，体验 <code>graph.get_state()</code> 查看中间状态</li>
+    <li><strong>并行搜索：</strong>把 search_node 改为并行执行两个不同的搜索（如 Wikipedia + 本地知识库），汇总结果</li>
+  </ol>
+</div>
+
+<h2>7. 关键 API 速记</h2>
+
+<table>
+  <tr><th>API</th><th>用途</th></tr>
+  <tr><td><code>StateGraph(StateType)</code></td><td>创建状态图，泛型参数为 State 类型</td></tr>
+  <tr><td><code>builder.add_node(name, func)</code></td><td>添加节点（可传单个函数或函数列表做并行）</td></tr>
+  <tr><td><code>builder.add_edge(from, to)</code></td><td>添加普通边（始终执行的流转）</td></tr>
+  <tr><td><code>builder.add_conditional_edges(from, router, mapping)</code></td><td>添加条件边（根据 State 决定路径）</td></tr>
+  <tr><td><code>builder.compile(checkpointer=...)</code></td><td>编译图，可选 checkpointer 实现状态持久化</td></tr>
+  <tr><td><code>graph.invoke(state_dict)</code></td><td>执行图，返回最终 State</td></tr>
+  <tr><td><code>graph.stream(state_dict)</code></td><td>流式执行，逐步返回每个节点的输出</td></tr>
+  <tr><td><code>Annotated[type, reducer]</code></td><td>定义带 reducer 的 State 字段（如 add_messages）</td></tr>
+</table>
+
+<h2>8. LangGraph vs 其他编排框架</h2>
+
+<table>
+  <tr><th>框架</th><th>特点</th><th>适合</th></tr>
+  <tr><td>LangGraph</td><td>状态图模型、Checkpointing、Human-in-the-Loop</td><td>复杂 Agent 工作流</td></tr>
+  <tr><td>LangChain create_agent</td><td>封装好的 Agent 循环</td><td>简单工具调用场景</td></tr>
+  <tr><td>CrewAI</td><td>角色扮演多 Agent、高层抽象</td><td>多角色协作但流程简单</td></tr>
+  <tr><td>AutoGen</td><td>对话驱动多 Agent、微软出品</td><td>多 Agent 对话协作</td></tr>
+  <tr><td>OpenAI Swarm</td><td>轻量多 Agent 实验框架</td><td>快速原型和实验</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>面试加分：</strong>提到 LangGraph 是"底层引擎"的概念——create_agent、CrewAI 都可以基于 LangGraph 实现。掌握了 LangGraph 就掌握了 Agent 编排的底层能力。
+</div>
+
+<h2>9. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/quickstart">LangGraph Quickstart — 官方入门</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph">Thinking in LangGraph — 核心设计理念</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/workflows-agents">LangGraph Agent Workflows — 面试必读</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/human-in-the-loop">Human-in-the-Loop — interrupt + Command 机制</a></li>
+  <li><a href="https://academy.langchain.com/courses/langgraph">LangChain Academy: LangGraph 课程</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>LangGraph 是本课程中最重要的模块——它是面试考察复杂 Agent 能力的主要方向。StateGraph 的条件边和 Checkpointing 是两大高频考点，确保完全理解再推进。随时问你的 Codia AI 助教。
+</div>
+
+<div class="nav">
+  <a href="0002-rag-pipeline.html">← 第二课：RAG 全流程</a>
+  <a href="0004-tools-and-memory.html">第四课：Tools + Memory 深入 →</a>
+</div>
+
+</body>
+</html>
