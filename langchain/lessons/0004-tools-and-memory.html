@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0004 — Tools + Memory：Agent 的两大核心能力</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0004: Tools + Memory</h1>
+<p class="lesson-meta">2026-06-28 · 预计时间 40 分钟 · 难度：中级偏高</p>
+
+<blockquote>
+  本课目标：深入 Agent 的两大核心——Tools（不只是函数声明，还包括错误处理、结构化输出、异步调用）和 Memory（短期记忆、长期记忆、LangGraph checkpoint 驱动的持久化记忆）。
+</blockquote>
+
+<h2>Part A: Tools 深入</h2>
+
+<h2>1. Tool 不只是函数</h2>
+
+<p>第一课我们定义 tool 只需要 type hints + docstring。面试官追问："这样够用吗？生产环境呢？"</p>
+
+<p>LangChain 提供了三层 tool 定义方式：</p>
+
+<style>
+.snippet-tabs { display: flex; gap: 0; margin: 1rem 0 0; }
+.snippet-tabs label {
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--code-bg);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+}
+.snippet-tabs label:hover { background: #e2e8f0; }
+.tab-content { display: none; }
+input[name="tool-tab"] { display: none; }
+input#tab1:checked ~ #content1,
+input#tab2:checked ~ #content2,
+input#tab3:checked ~ #content3 { display: block; }
+input#tab1:checked ~ .snippet-tabs label[for="tab1"],
+input#tab2:checked ~ .snippet-tabs label[for="tab2"],
+input#tab3:checked ~ .snippet-tabs label[for="tab3"] {
+  background: white;
+  border-bottom: 1px solid white;
+  margin-bottom: -1px;
+}
+</style>
+
+<input type="radio" name="tool-tab" id="tab1" checked>
+<input type="radio" name="tool-tab" id="tab2">
+<input type="radio" name="tool-tab" id="tab3">
+
+<div class="snippet-tabs">
+  <label for="tab1">Level 1: 函数自动转换</label>
+  <label for="tab2">Level 2: @tool 装饰器</label>
+  <label for="tab3">Level 3: BaseTool 类（生产级）</label>
+</div>
+
+<div id="content1" class="tab-content">
+
+<pre><code># Level 1: 最简单 — 函数即 Tool
+# LangChain 自动读 type hints + docstring 生成 schema
+def get_weather(city: str) -> str:
+    """Get current weather for a city.
+
+    Args:
+        city: City name
+    """
+    return f"Sunny, 25°C in {city}"
+
+# 直接传给 create_agent
+agent = create_agent(model, tools=[get_weather])</code></pre>
+
+</div>
+
+<div id="content2" class="tab-content">
+
+<pre><code># Level 2: @tool 装饰器 — 精确控制 schema
+from langchain_core.tools import tool
+
+@tool
+def search_database(
+    query: str,
+    limit: int = 5,
+    include_archived: bool = False,
+) -> list[dict]:
+    """Search the internal product database.
+
+    Args:
+        query: SQL-like search query
+        limit: Max results to return (1-20)
+        include_archived: Whether to include archived products
+    """
+    # ... 实际数据库查询 ...
+    return [{"id": 1, "name": "CloudSync Pro"}]
+
+# @tool 允许设 name, description, args_schema
+# 适合有复杂参数、默认值、可选参数的工具</code></pre>
+
+</div>
+
+<div id="content3" class="tab-content">
+
+<pre><code># Level 3: BaseTool 子类 — 完整控制
+from langchain_core.tools import BaseTool
+from pydantic import BaseModel, Field
+
+class RefundInput(BaseModel):
+    order_id: str = Field(description="Order ID to refund")
+    amount: float = Field(ge=0, le=99999, description="Amount in USD")
+    reason: str = Field(description="Refund reason")
+
+class RefundTool(BaseTool):
+    name: str = "process_refund"
+    description: str = "Process a refund for an order. Requires manager approval."
+    args_schema: type[BaseModel] = RefundInput
+
+    # 可注入依赖
+    db_session: Any = None
+
+    def _run(self, order_id: str, amount: float, reason: str) -> str:
+        # 真实的退款逻辑
+        return f"Refund {amount} for order {order_id}: approved"
+
+# BaseTool 优势：
+# 1. Pydantic 参数验证（Field 约束）
+# 2. 依赖注入（db_session 等）
+# 3. 可重写的错误处理钩子
+# 4. 异步 _arun 支持</code></pre>
+
+</div>
+
+<div class="callout">
+  <strong>面试要点：</strong>三种方式的选择——原型用函数，复杂参数用 @tool，生产环境（需要验证、依赖注入、错误处理）用 BaseTool。
+</div>
+
+<h2>2. Tool 的错误处理</h2>
+
+<p>面试常见场景题："Tool 调用失败了怎么办？Agent 会崩溃吗？"</p>
+
+<pre><code>from langchain_core.tools import tool
+
+@tool
+def fragile_api(query: str) -> str:
+    """Call external API. May fail."""
+    try:
+        result = call_external_service(query)
+        return result
+    except TimeoutError:
+        return "API 超时，请稍后重试"
+    except Exception as e:
+        # 返回给 LLM 可理解的错误信息，而不是抛异常
+        return f"工具调用失败：{str(e)}。请尝试其他方法。"
+</code></pre>
+
+<p><strong>关键原则：Tool 永远不抛异常给用户。</strong>返回一个描述性错误字符串，让 LLM 决定怎么处理（重试、换工具、承认失败）。</p>
+
+<div class="callout warn">
+  <strong>常见错误：</strong>新手会在 tool 里面 <code>raise Exception</code>。Agent 拿到异常后行为不可预期。正确做法是 catch 所有异常，返回人类可读的错误信息。
+</div>
+
+<h2>3. 异步 Tool</h2>
+
+<pre><code># 同步 tool
+@tool
+def slow_search(query: str) -> str:
+    return requests.get(f"https://api.example.com/search?q={query}")
+
+# 异步 tool — 不阻塞 Agent 循环
+@tool
+async def slow_search_async(query: str) -> str:
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"https://api.example.com/search?q={query}")
+        return r.json()["result"]
+
+# 或 BaseTool 上实现 _arun
+class AsyncSearchTool(BaseTool):
+    name = "search"
+    description = "Search the web"
+
+    def _run(self, query: str) -> str:
+        pass  # 同步回退
+
+    async def _arun(self, query: str) -> str:
+        async with httpx.AsyncClient() as client:
+            ...
+</code></pre>
+
+<hr>
+
+<h2>Part B: Memory 深入</h2>
+
+<h2>4. Memory 的三种形态</h2>
+
+<p>面试必问："Agent 怎么记住上下文？"</p>
+
+<table>
+  <tr><th>类型</th><th>机制</th><th>场景</th><th>LangChain 实现</th></tr>
+  <tr>
+    <td><strong>短期记忆</strong></td>
+    <td>把历史对话放进 context window</td>
+    <td>多轮对话中记住前面的问题</td>
+    <td>messages 列表 + add_messages reducer</td>
+  </tr>
+  <tr>
+    <td><strong>摘要记忆</strong></td>
+    <td>LLM 生成对话摘要，丢弃原始历史</td>
+    <td>长对话节省 token</td>
+    <td>SummarizationNode / LLM 调用</td>
+  </tr>
+  <tr>
+    <td><strong>持久化记忆</strong></td>
+    <td>存到外部存储，按需检索</td>
+    <td>跨 session 记住用户偏好</td>
+    <td>LangGraph Checkpointer + Vector Store</td>
+  </tr>
+</table>
+
+<div class="callout tip">
+  <strong>面试回答框架：</strong>说完三种记忆后加一句——"实际项目中最常见的组合是：会话语义上下文用 messages（短期）+ 跨 session 的用户偏好用向量库（长期）+ LangGraph MemorySaver 做 checkpoint（恢复中断）。"
+</div>
+
+<h2>5. 短期记忆：messages 列表</h2>
+
+<p>这是你在前几课不知不觉已经在用的：</p>
+
+<pre><code># 多轮对话 — 把整个 messages 列表传入
+messages = [
+    {"role": "user", "content": "北京天气？"},
+    {"role": "assistant", "content": "今天北京晴朗，25°C。"},
+    {"role": "user", "content": "那昨天呢？"},  # LLM 看到上文，知道"昨天"指北京
+]
+
+result = agent.invoke({"messages": messages})</code></pre>
+
+<p>问题：context window 有限（DeepSeek 64K，GPT-4 128K），历史消息会填满。</p>
+
+<p>解法：有两种常用策略——</p>
+
+<h3>策略 A: 滑动窗口</h3>
+<pre><code># 只保留最近 N 条消息
+MAX_HISTORY = 20
+recent_messages = messages[-MAX_HISTORY:]</code></pre>
+
+<h3>策略 B: 摘要压缩</h3>
+<pre><code># 用 LLM 把旧消息压缩成摘要
+def summarize_history(messages: list, model) -> str:
+    prompt = f"用中文概括以下对话的关键信息：\n{messages}"
+    return model.invoke(prompt).content
+
+old_summary = summarize_history(messages[:-10], model)
+# 新 prompt = 摘要 + 最近 10 条原始消息
+context = f"对话历史摘要：{old_summary}\n\n最近对话：{messages[-10:]}"</code></pre>
+
+<div class="callout">
+  <strong>面试加分：</strong>提到"摘要 + 滑动窗口的混合策略"——用 LLM 摘要压缩旧对话，同时保留最近 N 条原始消息。这是 DeepMind 论文中验证的最优方案，比单纯截断或纯摘要效果都好。
+</div>
+
+<h2>6. LangGraph Checkpoint 持久化记忆</h2>
+
+<p>本课最重要的概念：LangGraph 的 <strong>Checkpointer</strong> 是它区别于 create_agent() 的核心能力。</p>
+
+<pre><code>from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph
+
+# 编译时注入 checkpointer
+checkpointer = MemorySaver()
+graph = builder.compile(checkpointer=checkpointer)
+
+# 每次调用带 thread_id — 作为"会话标识"
+config = {"configurable": {"thread_id": "user-123"}}
+
+# 第一次对话
+result1 = graph.invoke(state, config)
+# 第二次对话（同 thread_id）— LangGraph 自动加载上次状态！
+result2 = graph.invoke(state, config)
+# result2 的 messages 包含 result1 的所有历史
+</code></pre>
+
+<p>Checkpointer 做了什么：</p>
+<ol>
+  <li>每次 <code>invoke()</code> 后自动保存完整的 State（messages、search_results 等）</li>
+  <li>下次同 thread_id 的调用自动恢复 State</li>
+  <li>支持 <code>graph.get_state(config)</code> 查看任意时间点的状态</li>
+  <li>支持 <code>graph.get_state_history(config)</code> 查看状态变更历史（时间旅行）</li>
+</ol>
+
+<h3>Checkpointer 选型</h3>
+
+<table>
+  <tr><th>Checkpointer</th><th>存储</th><th>场景</th></tr>
+  <tr><td><code>MemorySaver</code></td><td>内存 dict</td><td>开发/测试/短 session</td></tr>
+  <tr><td><code>SqliteSaver</code></td><td>本地 SQLite 文件</td><td>单机持久化，重启不丢</td></tr>
+  <tr><td><code>PostgresSaver</code></td><td>PostgreSQL</td><td>生产环境，多实例共享</td></tr>
+  <tr><td><code>RedisSaver</code></td><td>Redis</td><td>高并发低延迟</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>面试问题："多轮对话怎么实现？"</strong> 标准答案分三层——1) 短期：messages 列表传入 context window 2) 长期：LangGraph Checkpointer 持久化 State，按 thread_id 恢复 3) 跨 session：用 Vector Store 存用户偏好，检索注入 context。
+</div>
+
+<h2>7. Human-in-the-Loop</h2>
+
+<p>Memory 的另一面：有些操作不能让 Agent 自动执行。</p>
+
+<pre><code>from langgraph.types import interrupt
+
+def refund_node(state: AgentState) -> dict:
+    """处理退款 — 需要人工审批"""
+    order_id = state["pending_refund"]["order_id"]
+    amount = state["pending_refund"]["amount"]
+
+    # interrupt() 暂停执行，等待人工介入
+    approval = interrupt(f"确认退款 ${amount}？订单 {order_id}")
+
+    if approval == "approved":
+        # 执行退款
+        return {"refund_status": "done"}
+    else:
+        return {"refund_status": "cancelled"}
+
+# 运行时：
+# 1. graph.invoke(state) → 停在 refund_node，抛出 GraphInterrupt
+# 2. 人工审查后调用：
+#    graph.invoke(Command(resume="approved"), config)
+# 3. 从断点继续执行
+</code></pre>
+
+<div class="callout">
+  <strong>面试场景：</strong>"Agent 要发邮件/退款/删数据，怎么加安全控制？" → 回答用 interrupt() + Command(resume=...) 的 Human-in-the-Loop 模式。这是 LangGraph 的核心卖点。
+</div>
+
+<h2>8. 全技能融合：一个完整的记忆增强 Agent</h2>
+
+<p>把前三课的所有概念组合在一起：</p>
+
+<pre><code>from typing import TypedDict, Annotated, Literal
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
+from langchain_core.tools import tool
+from langchain.chat_models import init_chat_model
+
+# ----- State -----
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    user_profile: dict       # 长期记忆：用户偏好（从向量库查的）
+    pending_action: dict      # 需要人工审批的操作
+
+# ----- Tools -----
+@tool
+def search_kb(query: str) -> str:
+    """Search internal knowledge base."""
+    return "Found: ..."
+
+@tool
+def send_email(to: str, body: str) -> str:
+    """Send email. Requires manager approval."""
+    return "Email queued"
+
+# ----- Nodes -----
+def agent_node(state: AgentState) -> dict:
+    """LLM 推理节点 — 决定调用哪个 tool"""
+    model_with_tools = model.bind_tools([search_kb, send_email])
+    profile = state.get("user_profile", {})
+    system = f"你是助手。用户偏好：{profile}"
+    response = model_with_tools.invoke(
+        [{"role": "system", "content": system}] + state["messages"]
+    )
+    return {"messages": [response]}
+
+def tool_node(state: AgentState) -> dict:
+    """执行 tool 调用"""
+    last_msg = state["messages"][-1]
+    # langgraph 内置的 ToolNode 比手动写更优雅
+    # 这里展示手动逻辑以理解原理
+    results = []
+    for tc in last_msg.tool_calls:
+        if tc["name"] == "send_email":
+            # 高风险操作 → 走审批
+            return {"pending_action": tc}
+        else:
+            results.append(execute_tool(tc))
+    return {"messages": results}
+
+def approve_node(state: AgentState) -> dict:
+    """审批节点（Human-in-the-Loop）"""
+    action = state["pending_action"]
+    interrupt(f"Approve sending email to {action['to']}?")
+    # ... 执行操作 ...
+    return {"pending_action": None}
+
+# ----- Graph -----
+def should_continue(state: AgentState) -> Literal["tools", "approve", "end"]:
+    last = state["messages"][-1]
+    if state.get("pending_action"):
+        return "approve"
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        if last.tool_calls[0]["name"] == "send_email":
+            return "approve"
+        return "tools"
+    return "end"
+
+builder = StateGraph(AgentState)
+builder.add_node("agent", agent_node)
+builder.add_node("tools", tool_node)
+builder.add_node("approve", approve_node)
+builder.add_edge(START, "agent")
+builder.add_conditional_edges("agent", should_continue)
+builder.add_edge("tools", "agent")     # 拿到 tool 结果后回去推理
+builder.add_edge("approve", "agent")   # 审批后回去推理
+
+# 编译 — 带 Checkpointer 实现持久化记忆
+graph = builder.compile(checkpointer=MemorySaver())
+
+# 运行
+config = {"configurable": {"thread_id": "user-42"}}
+graph.invoke({"messages": [{"role": "user", "content": "给 ceo@corp.com 发邮件"}]}, config)</code></pre>
+
+<p>这个例子展示了：Tool 调用 → 条件分支 → 人工审批 → Checkpointer 记忆 → 长期状态管理。这是面试中能展示理解深度的完整案例。</p>
+
+<h2>9. 面试高频追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>Tool 太多（50+）怎么选？</td>
+    <td>1) 用 tool description 写好说明让 LLM 自选 2) 按领域分组，先路由到子领域再选 Tool 3) 用 Semantic Router 或 embedding 做预筛选</td>
+  </tr>
+  <tr>
+    <td>Context Window 满了怎么办？</td>
+    <td>分层策略：摘要压缩旧历史 + 滑动窗口保留近期 + 关键信息存外部存储按需检索（如 faiss）+ 用 context window 管理工具（如 trim_messages）</td>
+  </tr>
+  <tr>
+    <td>怎么实现"记住用户偏好"？</td>
+    <td>user_profile 存入可持久化存储（DB/Redis），每次 session 启动时加载。关键信息（语言偏好、权限级别）注入到 system prompt。</td>
+  </tr>
+  <tr>
+    <td>多个用户并发怎么隔离记忆？</td>
+    <td>用 thread_id 隔离。每个用户/会话一个 thread_id，Checkpointer 自动按 thread_id 存取状态。数据库隔离也由 thread_id 保证。</td>
+  </tr>
+  <tr>
+    <td>失败重试怎么设计？</td>
+    <td>Tool 层返回错误描述（不抛异常），LLM 决定重试策略。Graph 层可加 retry node 和计数 limit。LangGraph 的 Command(goto="retry") 可实现动态跳转。</td>
+  </tr>
+</table>
+
+<h2>10. 动手练习</h2>
+
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li><strong>改写 Tool：</strong>把第一课的 <code>get_weather</code> 函数升级为 @tool 装饰器版本，加入参数验证（只接受已知城市）和错误处理</li>
+    <li><strong>实现摘要记忆：</strong>在前面的 Agent 代码中加入一个 <code>summarize_node</code>，当 messages 超过 20 条时自动压缩</li>
+    <li><strong>Checkpointer 时间旅行：</strong>运行一个多轮对话，用 <code>graph.get_state_history(config)</code> 查看所有历史状态</li>
+    <li><strong>添加审批：</strong>选一个 tool 操作加入 <code>interrupt()</code>，体验人工审批流程（用 <code>Command(resume=...)</code> 恢复）</li>
+  </ol>
+</div>
+
+<h2>11. 关键 API 速记</h2>
+
+<table>
+  <tr><th>API</th><th>用途</th></tr>
+  <tr><td><code>@tool</code></td><td>装饰器定义 Tool，自动生成 schema</td></tr>
+  <tr><td><code>BaseTool</code></td><td>生产级 Tool 基类（Pydantic 验证 + 依赖注入 + 异步）</td></tr>
+  <tr><td><code>ToolNode(tools)</code></td><td>LangGraph 内置工具执行节点</td></tr>
+  <tr><td><code>model.bind_tools([...])</code></td><td>给模型注册工具列表</td></tr>
+  <tr><td><code>add_messages</code></td><td>LangGraph State 的消息追加 reducer</td></tr>
+  <tr><td><code>MemorySaver()</code></td><td>内存 Checkpointer（开发用）</td></tr>
+  <tr><td><code>graph.invoke(state, config)</code></td><td>带 thread_id 的状态持久化调用</td></tr>
+  <tr><td><code>graph.get_state(config)</code></td><td>查询当前状态</td></tr>
+  <tr><td><code>graph.get_state_history(config)</code></td><td>查询状态变更历史</td></tr>
+  <tr><td><code>interrupt(msg)</code></td><td>暂停图执行，等待人工介入</td></tr>
+  <tr><td><code>Command(resume=value)</code></td><td>恢复暂停的图执行</td></tr>
+</table>
+
+<h2>12. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/tools">LangChain Tools 概念文档</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/persistence">LangGraph Persistence — Checkpointer 官方文档</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/human-in-the-loop">Human-in-the-Loop — interrupt/Command 详解</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/memory">LangGraph Memory — 持久化记忆模式</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>Tools 和 Memory 是 Agent 系统中最核心的两个子系统——面试中 80% 的场景题都跟它们有关。确保你能手写 Tool 的三种定义方式，能解释 Checkpointing 的工作原理，再进入下一课。
+</div>
+
+<div class="nav">
+  <a href="0003-langgraph-workflow.html">← 第三课：LangGraph 工作流</a>
+  <a href="0005-multi-agent.html">第五课：多 Agent 协作 →</a>
+</div>
+
+</body>
+</html>
