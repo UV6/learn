@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0005 — 多 Agent 协作：子 Agent、监督者、编排模式</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0005: 多 Agent 协作</h1>
+<p class="lesson-meta">2026-06-28 · 预计时间 40 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：掌握多 Agent 协作的三种核心模式——Supervisor 路由、Subagent 委托、Swarm 协商——并理解每种模式的面试考察点和 LangGraph 实现方式。
+</blockquote>
+
+<h2>1. 为什么需要多 Agent？</h2>
+
+<p>单 Agent 的瓶颈：</p>
+
+<ul>
+  <li><strong>上下文过载：</strong>一个 prompt 里塞 50 个 tool，LLM 的选择准确率急剧下降</li>
+  <li><strong>责任模糊：</strong>一个 Agent 既要查数据库、又要写代码、又要做客服——prompt 太长，容易串</li>
+  <li><strong>无法并行：</strong>单 Agent 串行调用 tool，复杂任务延迟高</li>
+  <li><strong>安全边界模糊：</strong>读写操作混在同一个 Agent，风险大</li>
+</ul>
+
+<div class="callout">
+  <strong>面试一句话：</strong>"多 Agent 的核心思想是分治——把复杂任务拆成多个专业化子 Agent，每个只关注自己的领域。通过编排层协调它们的分工和通信。"
+</div>
+
+<h2>2. 三种多 Agent 模式</h2>
+
+<table>
+  <tr><th>模式</th><th>结构</th><th>适用场景</th><th>面试频率</th></tr>
+  <tr>
+    <td><strong>Supervisor 路由</strong></td>
+    <td>一个监督者 → 多个专业 Agent → 监督者汇总</td>
+    <td>客服分流、任务分类</td>
+    <td>⭐⭐⭐⭐⭐</td>
+  </tr>
+  <tr>
+    <td><strong>Subagent 委托</strong></td>
+    <td>主 Agent 把子任务委托给子 Agent（子 Agent 作为 Tool）</td>
+    <td>复杂研究、代码生成+审查</td>
+    <td>⭐⭐⭐⭐</td>
+  </tr>
+  <tr>
+    <td><strong>Swarm/Peer 协商</strong></td>
+    <td>多个平等 Agent 互相传递控制权</td>
+    <td>开放讨论、创意生成</td>
+    <td>⭐⭐⭐</td>
+  </tr>
+</table>
+
+<hr>
+
+<h2>Part A: Supervisor 模式</h2>
+
+<h2>3. 模式概述</h2>
+
+<p>Supervisor 是多 Agent 最经典的模式：</p>
+
+<pre><code>                       ┌─────────────────────┐
+                       │     Supervisor       │
+                       │   (LLM 决策路由)     │
+                       └──┬──────┬──────┬─────┘
+                          │      │      │
+                    ┌─────↓┐ ┌───↓──┐ ┌─↓──────┐
+                    │ Code │ │Search│ │Customer│
+                    │Agent │ │Agent │ │ Agent  │
+                    └──┬───┘ └──┬───┘ └───┬────┘
+                       │        │         │
+                       └────────┼─────────┘
+                                ↓
+                       ┌─────────────────────┐
+                       │    Supervisor 汇总   │
+                       └─────────────────────┘</code></pre>
+
+<p>Supervisor 本身也是一个 LLM 调用——它不做事，只决策"下一个应该叫谁"。工作完一轮后 Supervisor 判断是「继续派人」还是「汇总结束」。</p>
+
+<h2>4. LangGraph 实现</h2>
+
+<pre><code>from typing import TypedDict, Annotated, Literal
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain.chat_models import init_chat_model
+from langgraph.prebuilt import create_react_agent
+
+# ----- State -----
+class TeamState(TypedDict):
+    messages: Annotated[list, add_messages]
+    next: str  # supervisor 决定下一个谁干活
+    task: str  # 原始任务
+
+# ----- 子 Agent 定义 -----
+# 每个子 Agent 是一个独立的 create_react_agent（带专用 tool）
+
+def code_agent_node(state: TeamState) -> dict:
+    """Code Agent — 只负责写代码"""
+    code_agent = create_react_agent(
+        model,
+        tools=[read_file, write_file, run_tests],
+        system_prompt="你是代码专家。只处理和代码相关的任务。完成后用中文汇报结果。",
+    )
+    result = code_agent.invoke({"messages": state["messages"]})
+    # 取最后一条消息作为给 supervisor 的汇报
+    return {"messages": [result["messages"][-1]]}
+
+
+def search_agent_node(state: TeamState) -> dict:
+    """Search Agent — 只负责搜索和检索"""
+    search_agent = create_react_agent(
+        model,
+        tools=[web_search, search_kb],
+        system_prompt="你是搜索专家。只处理信息检索任务。完成后用中文汇报结果。",
+    )
+    result = search_agent.invoke({"messages": state["messages"]})
+    return {"messages": [result["messages"][-1]]}
+
+
+# ----- Supervisor：核心路由决策 -----
+MEMBERS = ["code_agent", "search_agent"]
+
+system_prompt = f"""你是团队监督者。团队成员：
+- code_agent: 写代码、调试、运行测试
+- search_agent: 搜索网页、查询知识库
+
+基于对话历史和当前任务，决定下一步：
+(1) 指派某个成员处理 → 输出其名称
+(2) 如果任务已完成 → 输出 "FINISH"
+
+只输出成员名称或 "FINISH"，不要其他内容。
+"""
+
+def supervisor_node(state: TeamState) -> dict:
+    """Supervisor 决定路由"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *state["messages"],
+    ]
+    response = model.invoke(messages)
+    decision = response.content.strip()
+    return {"next": decision}
+
+
+# ----- 路由函数 -----
+def route_supervisor(state: TeamState) -> Literal[
+    "code_agent", "search_agent", "__end__"
+]:
+    next_agent = state["next"]
+    if next_agent == "FINISH":
+        return "__end__"
+    if next_agent in MEMBERS:
+        return next_agent
+    return "__end__"  # fallback
+
+
+# ----- 构建 Graph -----
+builder = StateGraph(TeamState)
+builder.add_node("supervisor", supervisor_node)
+builder.add_node("code_agent", code_agent_node)
+builder.add_node("search_agent", search_agent_node)
+
+builder.add_edge(START, "supervisor")
+
+# 条件边：supervisor 决定谁去干活
+builder.add_conditional_edges("supervisor", route_supervisor)
+
+# 子 Agent 干完活 → 回到 supervisor（关键：形成循环）
+builder.add_edge("code_agent", "supervisor")
+builder.add_edge("search_agent", "supervisor")
+
+graph = builder.compile()
+
+# ----- 运行 -----
+result = graph.invoke({
+    "messages": [
+        {"role": "user", "content": "帮我查一下 Python 3.14 的新特性，并写一段示例代码展示 match-case 用法"}
+    ],
+    "task": "查资料 + 写代码",
+    "next": "",
+})
+# 工作流：supervisor → search_agent → supervisor → code_agent → supervisor → FINISH</code></pre>
+
+<div class="callout">
+  <strong>面试要点：</strong>Supervisor 模式的核心是"决策-执行-汇报-再决策"循环。Supervisor 本身是一个轻量 LLM 调用（不带 tool），子 Agent 各自有专用 tool。这样每个 Agent 的上下文都很干净。
+</div>
+
+<hr>
+
+<h2>Part B: Subagent 委托模式</h2>
+
+<h2>5. 模式概述</h2>
+
+<p>Subagent 模式是把子 Agent <strong>包装成一个 Tool</strong>：</p>
+
+<pre><code>主 Agent（带 N 个工具）
+  ├── tool: get_weather      ← 普通函数
+  ├── tool: search_kb        ← 普通函数
+  ├── tool: code_subagent   ← 一个完整的子 Agent！
+  └── tool: research_subagent ← 另一个子 Agent！</code></pre>
+
+<p>主 Agent 决定「这件事自己不干，委托给专业的子 Agent 干」。子 Agent 可以有自己独立的 tool 集合和 system prompt。</p>
+
+<p>对比 Supervisor 模式：</p>
+<table>
+  <tr><th></th><th>Supervisor</th><th>Subagent</th></tr>
+  <tr><td>控制权</td><td>Supervisor 集中决策</td><td>主 Agent LLM 选择委托</td></tr>
+  <tr><td>子 Agent 是</td><td>Graph 中的一个 node</td><td>主 Agent 的一个 tool</td></tr>
+  <tr><td>适用</td><td>任务类型明确可分</td><td>任务类型多变，需灵活委托</td></tr>
+  <tr><td>复杂度</td><td>需要额外的图结构</td><td>每层都是独立 Agent</td></tr>
+</table>
+
+<h2>6. 代码实现</h2>
+
+<pre><code>from langchain.agents import create_agent
+from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+
+model = init_chat_model("openai:deepseek-chat", temperature=0, ...)
+
+# Step 1: 定义子 Agent（作为 Tool 被主 Agent 调用）
+@tool
+def code_reviewer(code: str) -> str:
+    """Review code for bugs, security issues, and style problems.
+
+    Args:
+        code: The source code to review (full file content)
+    """
+    reviewer = create_react_agent(
+        model,
+        tools=[],  # reviewer 不需要额外 tool
+        system_prompt="""你是资深代码审查专家。审查代码时关注：
+1. 逻辑错误和 Bug
+2. 安全漏洞
+3. 性能问题
+4. 代码风格
+
+用中文给出结构化反馈：(问题) + (严重程度) + (修复建议)。""",
+    )
+    result = reviewer.invoke({
+        "messages": [{"role": "user", "content": f"审查以下代码：\n\n{code}"}]
+    })
+    return result["messages"][-1].content
+
+
+@tool
+def researcher(topic: str) -> str:
+    """Research a topic thoroughly and return a structured summary.
+
+    Args:
+        topic: The topic to research
+    """
+    researcher_agent = create_react_agent(
+        model,
+        tools=[],  # 可加 web_search 等
+        system_prompt="""你是研究专家。对任何话题：
+1. 列出核心概念和定义
+2. 对比不同方案/观点
+3. 给出最佳实践建议
+4. 用中文回答，结构清晰。""",
+    )
+    result = researcher_agent.invoke({
+        "messages": [{"role": "user", "content": f"研究以下话题：{topic}"}]
+    })
+    return result["messages"][-1].content
+
+
+# Step 2: 主 Agent — 带子 Agent 作为 tool
+main_agent = create_agent(
+    model=model,
+    tools=[code_reviewer, researcher, get_weather],
+    system_prompt="你是全栈工程师。可以写代码、审查代码、做技术调研。"
+                   "交给子 Agent 处理专业任务。",
+)
+
+# 使用
+result = main_agent.invoke({
+    "messages": [{
+        "role": "user",
+        "content": "帮我研究一下 GraphQL vs REST 的优缺点，然后审查这段代码：def foo(): pass"
+    }]
+})
+# 主 Agent 会：
+# 1. 调用 researcher("GraphQL vs REST") → 获取研究报告
+# 2. 调用 code_reviewer("def foo(): pass") → 获取审查意见
+# 3. 汇总两个子 Agent 的结果给出最终回答</code></pre>
+
+<div class="callout tip">
+  <strong>关键设计决策：</strong>子 Agent 的返回值应该是什么？推荐返回<strong>自然语言结果</strong>而不是结构化 JSON。这样主 Agent 可以直接理解子 Agent 的输出，不需要额外的解析层。面试能说清楚这个 tradeoff 是加分项。
+</div>
+
+<hr>
+
+<h2>Part C: Subgraph 嵌套模式</h2>
+
+<h2>7. 用 Subgraph 实现可复用 Agent</h2>
+
+<p>LangGraph 支持把一个 Graph 作为另一个 Graph 的节点——这就是 Subgraph。适合构建可复用的 Agent 模块。</p>
+
+<pre><code>from langgraph.graph import StateGraph
+
+# Step 1: 构建子 Graph（可复用的搜索 Agent）
+def build_search_subgraph() -> StateGraph:
+    """构建一个"搜索→评估→必要时再搜"的子图"""
+    builder = StateGraph(SearchState)
+    builder.add_node("search", search_node)
+    builder.add_node("evaluate", evaluate_node)
+    builder.add_node("rewrite", rewrite_query_node)
+    builder.add_edge(START, "search")
+    builder.add_conditional_edges("search", route_after_search)
+    builder.add_edge("rewrite", "search")
+    builder.add_edge("evaluate", END)
+    return builder.compile()
+
+
+# Step 2: 把子图嵌入父图
+class MainState(TypedDict):
+    messages: Annotated[list, add_messages]
+    query: str
+    search_output: str
+    final_answer: str
+
+main_builder = StateGraph(MainState)
+
+# 子图作为节点 — 关键！
+main_builder.add_node(
+    "search_phase",
+    build_search_subgraph(),  # ← 编译好的子图直接当节点用
+)
+
+main_builder.add_node("answer", answer_node)
+main_builder.add_edge(START, "search_phase")
+main_builder.add_edge("search_phase", "answer")
+main_builder.add_edge("answer", END)
+
+main_graph = main_builder.compile()</code></pre>
+
+<p>Subgraph 的优势：</p>
+<ul>
+  <li><strong>可复用：</strong>同一个子图可以被多个父图引用</li>
+  <li><strong>可测试：</strong>子图独立编译、独立测试</li>
+  <li><strong>关注分离：</strong>子图内部的复杂逻辑对外不可见，父图只需要知道输入输出</li>
+</ul>
+
+<h2>8. State 在父子图间如何传递？</h2>
+
+<p>面试高频细节题。默认行为：</p>
+<ul>
+  <li>子图接收父图的完整 State（所以子图 State 的字段必须是父图 State 的子集）</li>
+  <li>子图修改的字段会在子图执行完后写回父图</li>
+  <li>子图内部的状态变更对父图不可见（黑盒封装）</li>
+</ul>
+
+<pre><code># 父图 State 包含子图 State 的所有字段
+class ParentState(TypedDict):
+    query: str           # 父图独有
+    messages: list       # 共享
+    search_results: list # 共享（子图写入）
+
+# 子图 State 是父图的子集
+class ChildState(TypedDict):
+    messages: list       # 从父图继承
+    search_results: list # 子图写入，结束后写回父图</code></pre>
+
+<hr>
+
+<h2>Part D: 面试核心 — 模式选择指南</h2>
+
+<h2>9. 什么时候用什么模式？</h2>
+
+<table>
+  <tr><th>场景</th><th>推荐模式</th><th>原因</th></tr>
+  <tr>
+    <td>客服：投诉/退货/咨询</td>
+    <td>Supervisor 路由</td>
+    <td>任务类型可预定义，按意图分流</td>
+  </tr>
+  <tr>
+    <td>技术研究+写作</td>
+    <td>Subagent 委托</td>
+    <td>主 Agent 灵活决策何时研究、何时写</td>
+  </tr>
+  <tr>
+    <td>代码生成+审查+测试</td>
+    <td>Supervisor + 顺序管道</td>
+    <td>三个阶段有严格先后顺序</td>
+  </tr>
+  <tr>
+    <td>创意头脑风暴</td>
+    <td>Swarm 协商</td>
+    <td>多视角并行，无正确错误之分</td>
+  </tr>
+  <tr>
+    <td>复杂审批工作流</td>
+    <td>Supervisor + Subgraph</td>
+    <td>每阶段内部复杂，阶段间 supervisor 调度</td>
+  </tr>
+  <tr>
+    <td>多个独立的简单工具调用</td>
+    <td>单 Agent（create_agent）</td>
+    <td>不需要多 Agent 的复杂度</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>面试反模式提醒：</strong>多 Agent 不是银弹。如果单 Agent + 5 个 tool 能解决的事，引入多 Agent 只会增加延迟和复杂度。面试时先说"先评估是否真的需要多 Agent"能展示工程判断力。
+</div>
+
+<h2>10. 面试高频追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>多 Agent 怎么通信？</td>
+    <td>两种方式：1) 通过 State（共享内存，子 Agent 写入，其他 Agent 读取）2) 通过 Supervisor 转发消息。更复杂的场景用消息队列（但不常见）。</td>
+  </tr>
+  <tr>
+    <td>多 Agent 的 token 消耗怎么控制？</td>
+    <td>每个子 Agent 独立 context window。策略：1) 子 Agent 用短 system prompt + 专用 tool 2) Supervisor 只看到子 Agent 的输出摘要 3) 子 Agent 用更便宜的模型（如 haiku 做搜索，sonnet 做推理）。</td>
+  </tr>
+  <tr>
+    <td>怎么防止子 Agent 跑偏？</td>
+    <td>1) 子 Agent system prompt 收窄职责范围 2) Supervisor 设超时/迭代上限 3) 子 Agent 返回结果时包含置信度 4) 加 evaluator 节点审核子 Agent 输出。</td>
+  </tr>
+  <tr>
+    <td>Supervisor 模式下怎么处理失败？</td>
+    <td>子 Agent 不抛异常，返回错误描述。Supervisor 根据错误类型决策：换一个 Agent 重试、给原 Agent 更详细的指令、或向上汇报无法处理。这是"优雅降级"的设计模式。</td>
+  </tr>
+  <tr>
+    <td>和 OpenAI Swarm 的 handoff 有什么区别？</td>
+    <td>Swarm 的 handoff 是 Agent 主动交出控制权（"我不干了，你来"），LangGraph 的 Supervisor 是集中控制（"你去干活，干完回来汇报"）。集中控制更可控，handoff 更灵活。LangGraph 也支持类似 handoff 的 Command(goto=...) 模式。</td>
+  </tr>
+</table>
+
+<h2>11. 动手练习（综合项目）</h2>
+
+<div class="practice">
+  <h3>🛠 终极练习：构建你的面试项目</h3>
+  <p>用前五课的所有知识，构建一个 <strong>「智能客服系统」</strong>：</p>
+  <ol>
+    <li><strong>RAG 检索 Agent：</strong>从产品文档中检索相关信息（Lesson 2 的 RAG 管道）</li>
+    <li><strong>订单处理 Agent：</strong>查询订单状态、处理退款（Lesson 4 的 BaseTool + interrupt 审批）</li>
+    <li><strong>Supervisor 路由：</strong>根据用户意图分发给正确的 Agent（本课的 Supervisor 模式）</li>
+    <li><strong>Checkpointer 记忆：</strong>记住用户的多轮对话历史（Lesson 4 的 MemorySaver）</li>
+    <li><strong>可运行演示：</strong>终端中交互式对话（Lesson 1 的 agent.invoke）</li>
+  </ol>
+  <p>这个项目直接拿来面试展示——覆盖了从工具定义到多 Agent 编排的完整链路。</p>
+</div>
+
+<h2>12. 关键 API 速记</h2>
+
+<table>
+  <tr><th>API</th><th>用途</th></tr>
+  <tr><td><code>create_react_agent(model, tools, prompt)</code></td><td>创建子 Agent（langgraph.prebuilt）</td></tr>
+  <tr><td><code>子 Agent 作为 @tool</code></td><td>Subagent 委托模式</td></tr>
+  <tr><td><code>builder.add_node("name", subgraph)</code></td><td>子图作为节点（Subgraph 模式）</td></tr>
+  <tr><td><code>builder.add_conditional_edges(src, router)</code></td><td>Supervisor 的动态路由</td></tr>
+  <tr><td><code>graph.compile(checkpointer=...)</code></td><td>多 Agent 共享 Checkpointer</td></tr>
+  <tr><td><code>State 子集关系</code></td><td>父 State ⊇ 子 State（子图状态传递）</td></tr>
+</table>
+
+<h2>13. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/multi-agent">Multi-Agent Systems — 官方概念文档</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/multi-agent/subagents">Subagents — Agent as Tool 模式</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/workflows-agents#supervisor-agent">Supervisor Agent — LangGraph 官方教程</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/how-tos/subgraph">LangGraph Subgraphs — 子图详解</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/use-cases/multi-agent">Multi-Agent Use Cases — 完整案例集</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>这是本课程的最后一步。到这里你应该能回答："什么是 Agent？RAG 怎么搭？什么时候用 LangGraph？多 Agent 怎么协作？"——这是面试四连问。每一个问题的回答都应有代码支撑。
+</div>
+
+<div class="nav">
+  <a href="0004-tools-and-memory.html">← 第四课：Tools + Memory 深入</a>
+  <span>课程完结 🎉</span>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001 — Transformer 架构：Attention 的直觉与数学</title>
+<link rel="stylesheet" href="../assets/shared.css">
+<style>
+  .arch-diagram {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.35;
+    background: #f0f4ff;
+    border: 1px solid var(--accent-dim);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    white-space: pre;
+    overflow-x: auto;
+    color: #1e3a5f;
+  }
+  .formula {
+    text-align: center;
+    font-size: 1.1rem;
+    margin: 1rem 0;
+    padding: 0.5rem;
+    background: var(--code-bg);
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0001: Transformer 架构</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 40 分钟 · 难度：中级偏高</p>
+
+<blockquote>
+  本课目标：理解 Transformer 为什么会出现，Self-Attention 的 Q/K/V 直觉是什么，Multi-Head Attention 为什么要多头，并能手画 Transformer 的完整架构图。
+</blockquote>
+
+<h2>1. 为什么是 Transformer？</h2>
+
+<p>面试开场："Transformer 解决了 RNN/LSTM 的什么问题？"</p>
+
+<table>
+  <tr><th>RNN/LSTM</th><th>Transformer</th></tr>
+  <tr>
+    <td>串行处理：第 3 个 token 必须等前 2 个处理完</td>
+    <td><strong>并行处理</strong>：所有 token 同时计算 attention</td>
+  </tr>
+  <tr>
+    <td>长距离依赖衰减：第 1 个词和 第 100 个词的关系被 98 步"稀释"</td>
+    <td><strong>常数路径</strong>：任意两个 token 通过 O(1) 的 attention 直接连接</td>
+  </tr>
+  <tr>
+    <td>梯度消失/爆炸（LSTM 缓解但未根除）</td>
+    <td>Residual connection 让梯度顺畅流动</td>
+  </tr>
+  <tr>
+    <td>训练慢（时间步依赖）</td>
+    <td><strong>训练快</strong>（矩阵乘法高度并行，GPU 友好）</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <strong>面试标准答案：</strong>"Transformer 用 Self-Attention 机制替换了 RNN 的循环结构，实现了三个突破：(1) 并行计算——所有位置同时计算 attention（2）长距离依赖——任意两个 token 之间的信息路径长度是 O(1)（3）可解释性——attention 权重直观展示 token 之间的关系。"
+</div>
+
+<h2>2. 整体架构（先建心智模型）</h2>
+
+<p>Transformer 分 Encoder 和 Decoder 两半。<strong>但 GPT 只用了 Decoder</strong>——理解这一点对后续课程至关重要。</p>
+
+<div class="arch-diagram">
+                    ┌─────────────────────────┐
+                    │     Output Probabilities │
+                    │        Softmax           │
+                    │        Linear            │
+                    └──────────┬──────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            │           DECODER × N                │
+            │  ┌─────────────────────────────┐    │
+            │  │   Add &amp; Norm                 │    │
+            │  │   Feed Forward (FFN)         │    │
+            │  │   Add &amp; Norm                 │    │
+            │  │   Masked Multi-Head Attention│    │  ← "Masked" = 只看到左边（自回归）
+            │  └─────────────────────────────┘    │
+            │  ... 每个 Decoder 层还有:            │
+            │  Cross-Attention (非 GPT)            │  ← GPT 没有这个！
+            └──────────────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            │           ENCODER × N                │
+            │  ┌─────────────────────────────┐    │
+            │  │   Add &amp; Norm                 │    │
+            │  │   Feed Forward (FFN)         │    │
+            │  │   Add &amp; Norm                 │    │
+            │  │   Multi-Head Self-Attention  │    │  ← 看到全体（双向）
+            │  └─────────────────────────────┘    │
+            └──────────────────────────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │ Input Embedding      │
+                    │ + Positional Encoding│
+                    └─────────────────────┘
+</div>
+
+<table>
+  <tr><th>组件</th><th>计算什么</th><th>面试常问</th></tr>
+  <tr>
+    <td>Self-Attention</td>
+    <td>所有 token 两两之间的"相关程度"</td>
+    <td>Q/K/V 分别是什么？</td>
+  </tr>
+  <tr>
+    <td>Feed Forward (FFN)</td>
+    <td>对每个 token 独立做非线性变换（记住了知识）</td>
+    <td>为什么需要 FFN？</td>
+  </tr>
+  <tr>
+    <td>Add &amp; Norm</td>
+    <td>残差连接 + 层归一化（让梯度流畅）</td>
+    <td>为什么用 LayerNorm 而不是 BatchNorm？</td>
+  </tr>
+  <tr>
+    <td>Positional Encoding</td>
+    <td>注入位置信息（Attention 本身不区分先后）</td>
+    <td>Sinusoidal vs Learned 的区别？</td>
+  </tr>
+</table>
+
+<h2>3. Self-Attention：本课核心</h2>
+
+<h3>3.1 直觉</h3>
+
+<p>假设句子 <strong>"The cat sat on the mat because it was tired."</strong></p>
+
+<p>问题：「it」指什么？人类知道 it 指 cat，因为 cat 和 it 语义相关度高。</p>
+
+<p>Self-Attention 做的事：<strong>为句子中每个词计算它与所有其他词的"相关分数"。</strong></p>
+
+<ul>
+  <li>"it" 对 "cat" 的 attention 高 → 0.8</li>
+  <li>"it" 对 "mat" 的 attention 较低 → 0.15</li>
+  <li>"it" 对 "the" 的 attention 很低 → 0.05</li>
+</ul>
+
+<h3>3.2 从直觉到公式</h3>
+
+<p>面试时你不需要推导，但需要解释每个符号的含义：</p>
+
+<div class="formula">
+  Attention(Q, K, V) = softmax( Q·K<sup>T</sup> / √d<sub>k</sub> ) · V
+</div>
+
+<table>
+  <tr><th>术语</th><th>直觉</th><th>形状（以单头为例）</th></tr>
+  <tr>
+    <td><strong>Q (Query)</strong></td>
+    <td>"我在找什么？" — 当前 token 的"需求"向量</td>
+    <td>[seq_len, d_k]</td>
+  </tr>
+  <tr>
+    <td><strong>K (Key)</strong></td>
+    <td>"我是什么？" — 每个 token 的"标签"向量</td>
+    <td>[seq_len, d_k]</td>
+  </tr>
+  <tr>
+    <td><strong>V (Value)</strong></td>
+    <td>"我包含什么信息？" — 每个 token 的实际内容</td>
+    <td>[seq_len, d_v]</td>
+  </tr>
+  <tr>
+    <td><strong>Q·K<sup>T</sup></strong></td>
+    <td>Query 和每个 Key 的"匹配分数"（点积越大越相关）</td>
+    <td>[seq_len, seq_len] (注意力矩阵)</td>
+  </tr>
+  <tr>
+    <td><strong>/√d<sub>k</sub></strong></td>
+    <td><strong>Scale 因子</strong>——防止点积值太大 → softmax 梯度消失</td>
+    <td>标量</td>
+  </tr>
+  <tr>
+    <td><strong>softmax(...)</strong></td>
+    <td>把分数变成概率分布（每行和为 1）</td>
+    <td>[seq_len, seq_len]</td>
+  </tr>
+  <tr>
+    <td><strong>·V</strong></td>
+    <td>用注意力权重对 V 加权求和 → 输出</td>
+    <td>[seq_len, d_v]</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <strong>面试点睛：</strong>用检索类比解释 Q/K/V——Q 是搜索词，K 是文档标签，V 是文档内容。搜索 → 匹配标签 → 拉取内容。Self-Attention 就是在句子内部做"检索"。
+</div>
+
+<h3>3.3 为什么除以 √d<sub>k</sub> ？</h3>
+
+<p>面试高频追问。答案：</p>
+
+<p>当 d<sub>k</sub> 很大时（如 64），Q·K<sup>T</sup> 的值会很大。Softmax 对大输入值非常敏感——梯度趋近于 0（"饱和"）。除以 √d<sub>k</sub> 把数值范围拉回一个合理的区间，让 softmax 保持温和的梯度。</p>
+
+<p>这是论文中少数的"工程技巧"——不是理论必然，而是实验结果。</p>
+
+<h2>4. Multi-Head Attention</h2>
+
+<p>单头的问题：一个 attention 只能捕捉一类关系。</p>
+
+<p>多头 = 多组独立的 Q/K/V 投影 → 并行捕捉多种关系：</p>
+
+<div class="arch-diagram">
+  输入 X → 多组线性投影 →
+    ┌─ W<sub>Q1</sub>,W<sub>K1</sub>,W<sub>V1</sub> → Head1: Attention → output1
+    ├─ W<sub>Q2</sub>,W<sub>K2</sub>,W<sub>V2</sub> → Head2: Attention → output2
+    ├─ ...
+    └─ W<sub>Qh</sub>,W<sub>Kh</sub>,W<sub>Vh</sub> → Head8: Attention → output8
+  → Concat [output1, ..., output8] → W<sub>O</sub> → 最终输出
+</div>
+
+<p>面试理解：</p>
+<ul>
+  <li><strong>Head 1</strong> 可能学会关注"语法关系"（动词→主语）</li>
+  <li><strong>Head 2</strong> 可能学会关注"指代关系"（it→cat）</li>
+  <li><strong>Head 3</strong> 可能学会关注"语义相似度"</li>
+</ul>
+
+<p>每头处理 d<sub>k</sub> = d_model / h 维（如 512/8 = 64），总计算量和单头大维度相同，但表达能力更强。</p>
+
+<h2>5. 从 Transformer 到 GPT：为什么只要 Decoder？</h2>
+
+<p>GPT 是 <strong>decoder-only</strong> 架构。它扔掉了 Encoder 和 Cross-Attention，原因：</p>
+
+<ol>
+  <li><strong>自回归生成 = Decoder 的天生能力：</strong>Masked Self-Attention 确保每个 token 只看左边，完美匹配"一个接一个"的生成方式</li>
+  <li><strong>Encoder 的双向注意力不匹配生成：</strong>Encoder 能看到所有 token（包括"未来"），生成时不可用</li>
+  <li><strong>Scaling Law 的发现：</strong>OpenAI 发现只管堆 decoder 层数和数据，效果比复杂的 encoder-decoder 更好</li>
+</ol>
+
+<div class="callout tip">
+  <strong>面试金句：</strong>"GPT 选择 decoder-only 不是理论必然，而是工程实践的收敛——自回归 + 大规模数据 + 简单的架构 = 涌现能力。LLaMA、Mistral、Falcon 都遵循了这一范式。"
+</div>
+
+<h2>6. Feed Forward Network (FFN)：Transformer 的"知识库"</h2>
+
+<p>Attention 负责"检索"（token 之间怎么交互），FFN 负责"存储"（每个 token 内部的信息处理）。</p>
+
+<div class="formula">
+  FFN(x) = GELU(x·W<sub>1</sub> + b<sub>1</sub>)·W<sub>2</sub> + b<sub>2</sub>
+</div>
+
+<p>两个关键事实（面试必知）：</p>
+<ul>
+  <li><strong>FFN 占 Transformer 总参数的 2/3</strong> — 因为中间维度膨胀到 4×d_model</li>
+  <li><strong>FFN 存储了模型的知识</strong> — 研究表明 FFN 的权重编码了事实性知识（"巴黎是法国首都"），而 Attention 编码了 token 之间的关系</li>
+</ul>
+
+<h2>7. 面试高频追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>Attention 的复杂度？</td>
+    <td>O(n²·d)，n 是序列长度，d 是维度。n² 是瓶颈——当 n=128K 时不可接受。所以有 Flash Attention、Sparse Attention、Linear Attention 等优化。</td>
+  </tr>
+  <tr>
+    <td>LayerNorm vs BatchNorm？</td>
+    <td>BatchNorm 在 batch 维度做归一化（受 batch size 影响），LayerNorm 在 feature 维度做（不受 batch size 影响）。NLP 中序列长度不一，LayerNorm 更稳定。Transformer 选 LayerNorm 是必然的。</td>
+  </tr>
+  <tr>
+    <td>Post-Norm vs Pre-Norm？</td>
+    <td>原始论文用 Post-Norm (x + LayerNorm(Sublayer(x)))，但现代模型（LLaMA 等）都用 Pre-Norm (x + Sublayer(LayerNorm(x)))。Pre-Norm 训练更稳定，梯度不容易爆炸。</td>
+  </tr>
+  <tr>
+    <td>Positional Encoding 为什么需要？</td>
+    <td>Self-Attention 是置换不变的——"我爱你"和"你爱我"的 attention 矩阵完全相同。Positional Encoding 给每个位置注入一个标识向量，让模型知道 token 的顺序。</td>
+  </tr>
+  <tr>
+    <td>Encoder-Decoder Attention 是什么？</td>
+    <td>Decoder 的 Cross-Attention 层。它的 Q 来自 Decoder（我要生成什么），K/V 来自 Encoder（源语言提供了什么信息）。翻译模型用这个，GPT 不需要。</td>
+  </tr>
+  <tr>
+    <td>为什么现在都用 decoder-only？</td>
+    <td>3 个原因：(1) Scaling Law——简单架构 + 更多数据 > 复杂架构 (2) 自回归统一了预训练和下游任务——next-token prediction 就是一切 (3) 工程简洁——一种架构、一种训练目标、无微调切换。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+
+<div class="practice">
+  <h3>🛠 练习：内化 Attention</h3>
+  <ol>
+    <li><strong>手推一个例子：</strong>取 3 个 token、d_k=2，手动算一遍 Q·K<sup>T</sup>、scale、softmax、× V。感受一下数字是怎么流动的。</li>
+    <li><strong>手画架构图：</strong>不参考课件，默画 Transformer 的完整架构图。标注每个箭头旁边张量的形状。</li>
+    <li><strong>读代码：</strong>去 <a href="https://github.com/karpathy/nanoGPT">Andrej Karpathy 的 nanoGPT</a>，看 <code>model.py</code> 里的 <code>CausalSelfAttention</code> 类——看看 Q/K/V 的代码如何对应公式。</li>
+    <li><strong>面试自测：</strong>用 2 分钟口头解释 "Self-Attention 是什么"，录下来回听。目标是清晰、不结巴、有公式也有直觉。</li>
+  </ol>
+</div>
+
+<h2>9. 关键术语速记</h2>
+
+<table>
+  <tr><th>术语</th><th>一句话解释</th></tr>
+  <tr><td>Self-Attention</td><td>句子内的 token 两两计算相关度，加权聚合信息</td></tr>
+  <tr><td>Q/K/V</td><td>检索类比：搜索词 / 文档标签 / 文档内容</td></tr>
+  <tr><td>Multi-Head</td><td>多组并行的 attention，捕捉不同维度的关系</td></tr>
+  <tr><td>FFN</td><td>每个 token 独立的非线性变换，存储模型知识</td></tr>
+  <tr><td>Residual Connection</td><td>x + f(x)，让梯度绕过复杂变换直接传播</td></tr>
+  <tr><td>LayerNorm</td><td>在特征维度归一化，稳定训练</td></tr>
+  <tr><td>Positional Encoding</td><td>注入位置信息，打破 attention 的置换不变性</td></tr>
+  <tr><td>Decoder-only</td><td>只保留 Masked Self-Attention + FFN，GPT/LLaMA 的架构选择</td></tr>
+  <tr><td>Masked Attention</td><td>通过上三角 -∞ mask 阻止看到未来 token（自回归约束）</td></tr>
+</table>
+
+<h2>10. 推荐阅读</h2>
+
+<ul>
+  <li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need — 必读原论文</a></li>
+  <li><a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer — 最佳可视化教程</a></li>
+  <li><a href="https://www.youtube.com/watch?v=kCc8FmEb1nY">Karpathy: Let's build GPT from scratch（视频，2h）</a></li>
+  <li><a href="https://github.com/karpathy/nanoGPT">nanoGPT — 300 行代码的完整 GPT 实现</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>Transformer 是一座山，第一课只是上坡。把架构图印在脑子里，下节课我们深入 GPT 的自回归生成和 KV Cache。随时问你的 AI 助教。
+</div>
+
+<div class="nav">
+  <span></span>
+  <a href="0002-gpt-autoregressive.html">第二课：GPT 自回归生成 →</a>
+</div>
+
+</body>
+</html>
