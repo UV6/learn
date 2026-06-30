@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0004 — 训练 vs 推理：从 Pre-training 到 KV Cache</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0004: 训练 vs 推理</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 40 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：理解 LLM 生命周期的三个阶段——Pre-training → Fine-tuning (SFT+RLHF) → Inference——以及推理优化的核心技术：KV Cache、量化、Speculative Decoding。
+</blockquote>
+
+<h2>1. LLM 生命周期的三阶段</h2>
+
+<pre><code>┌─────────────┐    ┌──────────────────┐    ┌──────────────┐
+│ Pre-training│ →  │   Fine-tuning     │ →  │  Inference   │
+│  (月, $1-100M)│    │ (天-周, $1K-100K) │    │ (秒, $0.001) │
+└─────────────┘    └──────────────────┘    └──────────────┘
+  学世界知识         学对话格式+对齐           实际回答用户
+  next-token pred    SFT + RLHF              autoregressive</code></pre>
+
+<table>
+  <tr><th>阶段</th><th>做什么</th><th>数据</th><th>学到什么</th></tr>
+  <tr>
+    <td><strong>Pre-training</strong></td>
+    <td>在海量文本上做 next-token prediction</td>
+    <td>万亿 token 的 web text、code、books</td>
+    <td>世界知识、语法、推理能力</td>
+  </tr>
+  <tr>
+    <td><strong>SFT (有监督微调)</strong></td>
+    <td>在人工编写的对话数据上继续训练</td>
+    <td>10K-100K 高质量对话</td>
+    <td>对话格式、指令遵循</td>
+  </tr>
+  <tr>
+    <td><strong>RLHF (人类反馈强化学习)</strong></td>
+    <td>用人类偏好训练 reward model → 优化 policy</td>
+    <td>人类对回答的排序数据</td>
+    <td>安全性、有用性、诚实性</td>
+  </tr>
+  <tr>
+    <td><strong>Inference</strong></td>
+    <td>自回归生成 token</td>
+    <td>用户 prompt</td>
+    <td>(不学新知识)</td>
+  </tr>
+</table>
+
+<h2>2. RLHF 详解（面试重点）</h2>
+
+<p>RLHF (Reinforcement Learning from Human Feedback) 三步走：</p>
+
+<div class="arch-diagram">
+  Step 1: SFT Model → 拿对话数据微调 → 有基本的对话能力
+
+  Step 2: Reward Model
+    SFT Model 生成多个回答 → 人类排序(A&gt;B&gt;C&gt;D)
+    → 训练 Reward Model 预测人类偏好
+    → Reward(回答) = 标量分数
+
+  Step 3: PPO 优化
+    SFT Model (policy) 生成回答 → Reward Model 打分
+    → PPO 算法更新 policy (使得分变高)
+    → 同时加 KL 惩罚 (不要偏离 SFT 太远)
+</div>
+
+<div class="callout">
+  <strong>面试精炼：</strong>"RLHF 的核心是用人类偏好数据训练一个 reward model，然后用 PPO 强化学习优化语言模型。关键是加了 KL 散度惩罚，防止模型为了高分而生成无意义的文本或过度偏离 SFT 分布。这是 OpenAI 公开的 ChatGPT 训练方法。"
+</div>
+
+<p><strong>为什么需要 RLHF 而不只是 SFT？</strong></p>
+<ul>
+  <li>SFT 只能学到"平均"的人类行为——不会拒绝、不会质疑、不会说"我不知道"</li>
+  <li>RLHF 让模型学会偏好——有用 > 无用，安全 > 不安全，诚实 > 编造</li>
+  <li>但 RLHF 也有争议：可能导致 sycophancy（讨好用户）、reward hacking</li>
+</ul>
+
+<h2>3. KV Cache：推理优化的基石</h2>
+
+<h3>问题</h3>
+<p>回想 Lesson 2：推理时每次生成一个 token 都要重新计算全序列的 attention。第 100 步时，前 99 个 token 的 K/V 已经算过了——为什么要重算？</p>
+
+<h3>解法：缓存</h3>
+<pre><code>Step 1: "I" → 算 K₁,V₁ → 缓存 [K₁, V₁] → 输出 "love"
+Step 2: "love" → 只算新 token 的 K₂,V₂ → 缓存 [K₁,V₁, K₂,V₂] → 输出 "AI"
+Step 3: "AI" → 只算新 token 的 K₃,V₃ → 使用全量缓存 → 输出 "!"
+...
+</code></pre>
+
+<h3>KV Cache 的内存分析</h3>
+<p>每层的 KV Cache 大小：</p>
+<div class="formula">
+  2 × batch_size × num_layers × seq_len × num_kv_heads × head_dim × dtype_bytes
+</div>
+<p>例子：LLaMA 2 70B, batch=1, 2048 tokens, fp16 → 约 1.2 GB。当 seq_len=128K 时 → ~80 GB。这就是为什么长上下文推理那么贵。</p>
+
+<div class="callout">
+  <strong>关键 tradeoff：</strong>KV Cache 用<strong>空间换时间</strong>——推理速度从 O(n²) 降到 O(n)（每次只需算一个新 token），但内存从 O(1) 升到 O(n)。GQA (Lesson 3) 正是为了减少 KV Cache 而设计的。
+</div>
+
+<h2>4. 量化：把模型变小</h2>
+
+<table>
+  <tr><th>精度</th><th>每参数 bytes</th><th>70B 模型大小</th><th>质量影响</th></tr>
+  <tr><td>FP32</td><td>4</td><td>~280 GB</td><td>baseline</td></tr>
+  <tr><td>FP16 / BF16</td><td>2</td><td>~140 GB</td><td>几乎无损</td></tr>
+  <tr><td>INT8</td><td>1</td><td>~70 GB</td><td>轻微</td></tr>
+  <tr><td>INT4 (GPTQ, AWQ)</td><td>0.5</td><td>~35 GB</td><td>可接受（perplexity +0.5~2）</td></tr>
+  <tr><td>GGUF Q4_K_M</td><td>~0.56</td><td>~40 GB</td><td>良好（llama.cpp 最常用）</td></tr>
+</table>
+
+<p>面试高频问题："你们项目的模型是多少精度？为什么选这个精度？" ——回答要点：根据硬件选精度，单卡 80GB A100 可以跑 70B INT4，FP16 需要双卡。</p>
+
+<h2>5. Speculative Decoding：用小模型加速大模型</h2>
+
+<p>问题：大模型一次只能生成 1 个 token，但很多 token 是简单的（如 "the", "a", 标点）。</p>
+
+<p>解法：</p>
+
+<pre><code>Step 1: 小模型 (draft model, 如 0.5B) 快速生成 5 个候选 token
+Step 2: 大模型 (target model) 一次验证这 5 个 token
+        → 如果第 3 个 token 被拒绝，保留前 2 个，重新生成
+Step 3: 继续循环
+
+结果：平均每次生成 3-4 个 token (vs 原来的 1 个)
+     延迟降低 2-3 倍，质量无损（大模型做了最终验证）
+</code></pre>
+
+<div class="callout tip">
+  <strong>面试加分：</strong>"Speculative decoding 是 inference-time 优化，不改变模型权重。它利用了'大多数 token 的预测是 easy case'这个事实——小模型足以处理 trivial tokens，大模型只做验证。Google 的论文显示 2-4 倍加速。"
+</div>
+
+<h2>6. 训练优化的核心概念</h2>
+
+<table>
+  <tr><th>技术</th><th>解决什么</th><th>一句话</th></tr>
+  <tr><td>混合精度训练 (AMP)</td><td>显存 + 速度</td><td>前向用 FP16，关键计算用 FP32</td></tr>
+  <tr><td>梯度累积</td><td>模拟大 batch</td><td>N 步累加梯度再更新一次</td></tr>
+  <tr><td>Flash Attention</td><td>显存 + 速度</td><td>分块计算 attention，避免 HBM 读写</td></tr>
+  <tr><td>ZeRO (DeepSpeed)</td><td>分布式训练</td><td>把 optimizer state/梯度/参数分片到多卡</td></tr>
+  <tr><td>Tensor Parallelism</td><td>单层太大</td><td>把一个层切到多 GPU 上并行计算</td></tr>
+  <tr><td>Pipeline Parallelism</td><td>多层太大</td><td>不同的层放在不同 GPU</td></tr>
+</table>
+
+<h2>7. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>DPO vs RLHF？</td>
+    <td>DPO (Direct Preference Optimization) 跳过 reward model，直接优化人类偏好。数学上等价于 RLHF 但更简单——不需要训练单独的 reward model、不需要 PPO。现在越来越多模型用 DPO 替代 RLHF。</td>
+  </tr>
+  <tr>
+    <td>为什么推理比训练便宜？</td>
+    <td>训练做 backpropagation（三倍计算），推理只做 forward。但推理的 KV cache 内存压力随序列长度线性增长，长上下文推理依然很贵。</td>
+  </tr>
+  <tr>
+    <td>怎么选量化方案？</td>
+    <td>GGUF 用于 CPU 推理 (llama.cpp)；GPTQ/AWQ 用于 GPU；bitsandbytes 用于 HuggingFace 快速实验。关键看部署环境——手机/边缘用 GGUF，服务器 GPU 用 AWQ。</td>
+  </tr>
+  <tr>
+    <td>LoRA 和 Full Fine-tuning 的区别？</td>
+    <td>LoRA 只训练低秩适配矩阵（额外参数 0.1-1%），冻结原模型权重。好处：显存小、训练快、可以多个 LoRA 叠加（一个模型多个能力）。代价：效果不如 Full Fine-tuning。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>用 HuggingFace 加载一个小模型（如 GPT-2），启用 KV Cache，对比有无 cache 的推理速度差异</li>
+    <li>下载 llama.cpp，加载一个 GGUF 量化模型，体验本地推理</li>
+    <li>手算：LLaMA 2 7B (32 layers, 32 heads, d=4096, fp16) 在 4096 token 时的 KV Cache 大小（用 GQA g=32 和 g=8 分别算）</li>
+  </ol>
+</div>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://arxiv.org/abs/2203.02155">InstructGPT / RLHF 论文 (Ouyang et al., 2022)</a></li>
+  <li><a href="https://arxiv.org/abs/2305.18290">DPO 论文 (Rafailov et al., 2023)</a></li>
+  <li><a href="https://arxiv.org/abs/2302.01318">Speculative Decoding (Leviathan et al., 2023)</a></li>
+  <li><a href="https://arxiv.org/abs/2205.05135">Flash Attention (Dao et al., 2022)</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0003-llama-improvements.html">← 第三课：LLaMA 改进</a>
+  <a href="0005-scaling-laws.html">第五课：Scaling Law →</a>
+</div>
+
+</body>
+</html>

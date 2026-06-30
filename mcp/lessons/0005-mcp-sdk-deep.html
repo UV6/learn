@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0005 — MCP SDK 深入：两种 SDK 对比 + 高级模式</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0005: MCP SDK 深入</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 40 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：深入 Python SDK 和 TypeScript SDK 的 API 设计差异，理解 Sampling、Notifications、Streamable HTTP 等高级特性。
+</blockquote>
+
+<h2>1. Python SDK vs TypeScript SDK</h2>
+
+<p>MCP 官方维护两个 SDK——Python（更简洁）和 TypeScript（更完整）。你需要知道核心差异：</p>
+
+<table>
+  <tr><th></th><th>Python SDK</th><th>TypeScript SDK</th></tr>
+  <tr><td>底层库</td><td><code>mcp</code> (pip)</td><td><code>@modelcontextprotocol/sdk</code> (npm)</td></tr>
+  <tr><td>高层封装</td><td><code>FastMCP</code></td><td><code>McpServer</code> (BaseServer 子类)</td></tr>
+  <tr><td>工具定义</td><td>装饰器 + 函数签名自动推断 schema</td><td><code>server.tool(name, description, schema, handler)</code></td></tr>
+  <tr><td>类型系统</td><td>Pydantic models</td><td>Zod schemas</td></tr>
+  <tr><td>Resource 管理</td><td><code>@mcp.resource(uri)</code></td><td><code>server.resource(name, uri, handler)</code></td></tr>
+  <tr><td>Streamable HTTP</td><td>实验性支持</td><td>正式支持</td></tr>
+  <tr><td>生态成熟度</td><td>略领先（AI/ML 生态用 Python 更多）</td><td>功能更全（Web/JS 生态）</td></tr>
+</table>
+
+<div class="callout">
+  <strong>选择建议：</strong>如果你的 MCP Server 需要调用 Python ML 库（如 langchain, huggingface）→ Python SDK。如果你的 MCP Server 是 Node.js 服务的一部分 → TypeScript SDK。纯工具类（文件、API 封装）→ 两种都可以，选你更熟悉的那门语言。
+</div>
+
+<h2>2. Sampling：让 MCP Server 反过来调用 LLM</h2>
+
+<p>MCP 协议支持双向能力——不仅 Client 可以调 Server 的工具，<strong>Server 也可以请求 Client 帮忙调用 LLM（Sampling）</strong>：</p>
+
+<pre><code># Server 端代码：请求 Client 帮忙生成文本
+from mcp.types import CreateMessageRequest, SamplingMessage
+
+@server.call_tool()
+async def handle_summarize(name, arguments):
+    """这个工具本身需要 LLM 来生成摘要"""
+
+    # 请求 Client 帮我调用 LLM
+    result = await server.request_sampling(
+        CreateMessageRequest(
+            messages=[
+                SamplingMessage(
+                    role="user",
+                    content=TextContent(
+                        type="text",
+                        text=f"Summarize: {arguments['text']}"
+                    ),
+                ),
+            ],
+            maxTokens=200,
+        )
+    )
+
+    # result.content 是 LLM 生成的摘要
+    return [TextContent(type="text", text=result.content)]
+</code></pre>
+
+<p>使用场景：</p>
+<ul>
+  <li><strong>Agent 链：</strong>一个 MCP Server 调用另一个 MCP Server 的 LLM 能力</li>
+  <li><strong>内容生成：</strong>Server 需要 LLM 完成子任务（摘要、翻译、格式转换）</li>
+  <li><strong>动态 Prompt：</strong>Server 根据运行时条件构建 prompt，委托 Client 执行</li>
+</ul>
+
+<div class="callout warn">
+  <strong>注意：</strong>Sampling 需要 Client 在 initialize 时声明 <code>capabilities.sampling</code>。不是所有 MCP Client 都支持 Sampling——Claude Desktop 支持，但部分第三方 Client 可能不支持。使用前需要做能力协商。
+</div>
+
+<h2>3. Notifications：Server 主动推送</h2>
+
+<p>MCP 的 Notification 机制让 Server 可以主动告知 Client 状态变化：</p>
+
+<pre><code># Server 端：工具列表变更时通知 Client
+await server.request_context.session.send_notification(
+    "notifications/tools/list_changed"
+)
+
+# Server 端：资源更新时通知 Client
+await server.request_context.session.send_notification(
+    "notifications/resources/updated",
+    {"uri": "orders://all"}  # 告知 Client 哪个资源变了
+)</code></pre>
+
+<p>Client 端收到通知后通常会重新调用 tools/list 或 resources/read，保持 UI 同步。</p>
+
+<h2>4. 高级 Tool 模式</h2>
+
+<h3>4.1 异步长任务</h3>
+
+<pre><code>@server.call_tool()
+async def handle_long_task(name, arguments):
+    if name == "train_model":
+        # 启动异步训练
+        task_id = start_training(arguments)
+
+        # 返回任务 ID，让 Client 轮询
+        return [TextContent(
+            type="text",
+            text=f"训练已启动，任务 ID: {task_id}。通过 check_training_status 查询进度。"
+        )]
+</code></pre>
+
+<h3>4.2 分页返回</h3>
+
+<pre><code>@server.list_resources()
+async def list_resources(cursor: str | None = None):
+    all_resources = get_all_files()  # 可能有 10000 个
+    page_size = 100
+
+    if cursor:
+        start = int(cursor)
+    else:
+        start = 0
+
+    page = all_resources[start : start + page_size]
+    next_cursor = str(start + page_size) if len(page) == page_size else None
+
+    return ListResourcesResult(
+        resources=page,
+        nextCursor=next_cursor,
+    )
+</code></pre>
+
+<h3>4.3 Elicitation：Tool 向用户提问</h3>
+
+<pre><code>@server.call_tool()
+async def handle_ambiguous(name, arguments):
+    if name == "search_file" and not arguments.get("directory"):
+        # 请求 Client 向用户询问更多信息
+        result = await server.request_context.session.send_request(
+            "elicitation/create",
+            CreateElicitationRequest(
+                message="Which directory should I search in?",
+            ),
+        )
+        directory = result.directory
+        # 继续搜索...
+</code></pre>
+
+<h2>5. 部署模式对比</h2>
+
+<table>
+  <tr><th>模式</th><th>配置</th><th>适用</th></tr>
+  <tr>
+    <td>本地 stdio</td>
+    <td><code>{"command": "python", "args": ["server.py"]}</code></td>
+    <td>个人使用、开发调试</td>
+  </tr>
+  <tr>
+    <td>本地 HTTP</td>
+    <td><code>{"url": "http://localhost:8000/sse"}</code></td>
+    <td>团队内共享</td>
+  </tr>
+  <tr>
+    <td>Docker</td>
+    <td><code>{"command": "docker", "args": ["run", "-i", "my-mcp"]}</code></td>
+    <td>依赖隔离、跨平台分发</td>
+  </tr>
+  <tr>
+    <td>NPM 发布</td>
+    <td><code>npx @scope/mcp-server</code></td>
+    <td>TypeScript MCP Server 分发</td>
+  </tr>
+</table>
+
+<h2>6. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>把上节课的 Server 加上分页——如果有 500 个 Resource，分 5 页返回</li>
+    <li>实现一个 Sampling：Tool 收到长文本后，请求 Client 帮忙做摘要再返回</li>
+    <li>对比 Python SDK 和 TypeScript SDK 的 Star History 和 Issues，写一个简短的选型建议</li>
+  </ol>
+</div>
+
+<h2>7. 推荐阅读</h2>
+<ul>
+  <li><a href="https://github.com/modelcontextprotocol/python-sdk/tree/main/examples">Python SDK 示例代码</a></li>
+  <li><a href="https://github.com/modelcontextprotocol/typescript-sdk">TypeScript SDK — GitHub</a></li>
+  <li><a href="https://spec.modelcontextprotocol.io/">MCP 协议规范（最新的 experimental features）</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0004-skill-development.html">← 第四课：Skill 开发</a>
+  <span>MCP 课程完结 🎉</span>
+</div>
+
+</body>
+</html>

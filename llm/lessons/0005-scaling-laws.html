@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0005 — Scaling Law 与涌现能力</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0005: Scaling Law 与涌现</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：理解 Scaling Law 的三个维度、Chinchilla Optimal、涌现能力的本质与争议、以及 MoE 如何"欺骗"Scaling Law。
+</blockquote>
+
+<h2>1. Scaling Law 是什么？</h2>
+
+<p>面试必问："Scaling Law 讲了什么？对 LLM 设计有什么指导意义？"</p>
+
+<p>2020 年 OpenAI 的 Kaplan 等人发现：<strong>模型的 loss 与模型参数量 N、训练数据量 D、计算量 C 之间存在幂律关系。</strong></p>
+
+<div class="formula">
+  L(N, D, C) ≈ (N<sub>c</sub>/N)<sup>α<sub>N</sub></sup> + (D<sub>c</sub>/D)<sup>α<sub>D</sub></sup> + L<sub>∞</sub>
+</div>
+
+<p>通俗说：</p>
+<ul>
+  <li><strong>参数翻倍 → Loss 降低约 5-10%</strong></li>
+  <li><strong>数据翻倍 → Loss 降低约 5-10%</strong></li>
+  <li><strong>计算翻倍 → Loss 降低约 5-10%</strong></li>
+  <li><strong>三者必须同步增长——仅增大模型而不加数据，效果有限</strong></li>
+</ul>
+
+<h2>2. Kaplan vs Chinchilla：两种 Scaling Law</h2>
+
+<table>
+  <tr><th></th><th>Kaplan (OpenAI, 2020)</th><th>Chinchilla (DeepMind, 2022)</th></tr>
+  <tr><td>核心结论</td><td>优先增大模型</td><td>模型和数据等比例增长</td></tr>
+  <tr><td>70B 模型最优数据量</td><td>~300B tokens</td><td><strong>~1.4T tokens</strong></td></tr>
+  <tr><td>训练策略</td><td>大模型 + 相对少数据</td><td>中等模型 + 海量数据</td></tr>
+  <tr><td>实际影响</td><td>GPT-3 175B 训练了 300B tokens</td><td>LLaMA 7B 训练了 1T tokens（效果超 GPT-3）</td></tr>
+</table>
+
+<div class="callout">
+  <strong>面试精炼：</strong>"Chinchilla Law 推翻了 Kaplan 的'优先增大模型'结论，证明了数据和模型应该等比例增长——给定计算预算，存在最优的模型大小和数据量的配比。LLaMA 的成功验证了这一点：小模型 + 多数据 > 大模型 + 少数据。"
+</div>
+
+<p><strong>LLaMA 的"叛逆"</strong>：LLaMA 故意在远超 Chinchilla optimal 的数据量上训练——7B 训 1T tokens，13B 训 1T，33B 训 1.4T，65B 训 1.4T。这是为了<strong>做最小的推理成本模型</strong>——小模型推理快、部署便宜，通过过量训练补偿小参数量。</p>
+
+<h2>3. 涌现能力 (Emergent Abilities)</h2>
+
+<p>2022 年 Google 的论文发现：某些能力在模型规模达到某个阈值之前<strong>完全不存在</strong>，超过阈值后<strong>突然出现</strong>。这就是"涌现"。</p>
+
+<table>
+  <tr><th>能力</th><th>出现规模</th><th>表现</th></tr>
+  <tr><td>Few-shot 推理</td><td>~10B</td><td>给几个例子就能做新任务</td></tr>
+  <tr><td>Chain-of-Thought</td><td>~60B</td><td>中间推理步骤提升准确率</td></tr>
+  <tr><td>多语言翻译</td><td>~50B</td><td>跨语言零样本翻译</td></tr>
+  <tr><td>代码生成</td><td>~10B</td><td>从自然语言生成可运行代码</td></tr>
+  <tr><td>TruthfulQA 诚实性</td><td>~50B</td><td>不编答案、承认不知道</td></tr>
+</table>
+
+<h3>争议：涌现是真的还是度量偏差？</h3>
+
+<p>2023 年 Stanford 论文质疑：很多"涌现"是<strong>非线性度量</strong>（如 accuracy）造成的视觉假象。如果用<strong>连续度量</strong>（如 token-level cross-entropy），能力增长是平滑的，不需要"突发"。</p>
+
+<div class="callout warn">
+  <strong>面试展示深度：</strong>"涌现能力存在争议。部分研究认为它是非平滑度量的人为现象，而非模型内部发生了质变。但无论理论如何，工程上'大模型有而小模型没有的能力'这个事实是确凿的——所以做产品时仍需要足够的模型规模。"
+</div>
+
+<h2>4. MoE：骗过 Scaling Law 的架构</h2>
+
+<p>Mixture of Experts (MoE) 是当前最火的大模型架构——Mixtral 8×7B、DeepSeek-V2、GPT-4（传闻）。</p>
+
+<h3>MoE 的原理</h3>
+
+<div class="arch-diagram">
+  Dense Model:                     MoE Model:
+  ┌────────────┐                   ┌──────────────────────┐
+  │   FFN 层    │                   │   Router (门控网络)    │
+  │  (全激活)   │                   │ "这个 token 给谁处理？" │
+  └────────────┘                   └──┬──────┬──────┬─────┘
+       一次激活                       │      │      │
+      100% 参数                 Expert₁ Expert₂ Expert₈
+    vs                               (只激活 top-2 专家)
+                                    一次激活 ~15% 参数
+</div>
+
+<p>MoE 的聪明之处：<strong>总参数很大，但每次推理只激活一小部分。</strong></p>
+
+<ul>
+  <li>Mixtral 8×7B：总参数 46.7B，每次激活 ~12.9B（接近 13B dense 模型的推理成本）</li>
+  <li>DeepSeek-V2：总参数 236B，每次激活 ~21B</li>
+</ul>
+
+<div class="callout">
+  <strong>面试对比：</strong>"MoE 用稀疏激活'欺骗'了 Scaling Law——它在总参数量维度上遵循 Scaling Law（总参数越大 loss 越低），但在推理成本维度上得益于只激活部分参数。核心 tradeoff 是推理显存（需要装下全部专家，~3-5× dense 模型）和推理算力（只算激活专家，~= dense 小模型）。"
+</div>
+
+<h2>5. LLM 研究的未来方向</h2>
+<table>
+  <tr><th>方向</th><th>解决什么</th></tr>
+  <tr><td>长上下文</td><td>从 128K → 1M+ token（Gemini 已到 2M）</td></tr>
+  <tr><td>多模态</td><td>文本+图像+音频+视频统一理解与生成</td></tr>
+  <tr><td>Agent 能力</td><td>从"回答问题"到"执行行动"（tool use、代码执行）</td></tr>
+  <tr><td>推理优化</td><td>更快的 speculative decoding、更小的量化模型</td></tr>
+  <tr><td>数据瓶颈</td><td>互联网文本快用完了，合成数据、多模态数据是出路</td></tr>
+  <tr><td>对齐与安全</td><td>从 RLHF 到 Constitutional AI、可解释性</td></tr>
+</table>
+
+<h2>6. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>为什么 Scaling Law 是幂律？</td>
+    <td>目前没有完整的理论解释——它是经验发现。可能的解释与数据中的长尾分布有关：总有更罕见的知识需要更多参数/数据来学习。但这仍是一个开放问题。</td>
+  </tr>
+  <tr>
+    <td>Chinchilla 最优之后还有提升空间吗？</td>
+    <td>有——LLaMA 和 DeepSeek 等都在 overtrain（超过 Chinchilla 最优数据量）。超越 Chinchilla 仍有收益，只是边际递减。实践中推理成本是更关键的约束，所以 overtraining 小模型很流行。</td>
+  </tr>
+  <tr>
+    <td>MoE 的负载均衡怎么解决？</td>
+    <td>Expert 之间可能负载不均——有些专家被频繁调用，有些几乎不用。解法：(1) auxiliary loss 惩罚不均匀 (2) expert choice routing（让专家选 token，而非 token 选专家）(3) 动态调整 expert 容量。</td>
+  </tr>
+</table>
+
+<h2>7. 推荐阅读</h2>
+<ul>
+  <li><a href="https://arxiv.org/abs/2001.08361">Kaplan Scaling Law 论文 (OpenAI, 2020)</a></li>
+  <li><a href="https://arxiv.org/abs/2203.15556">Chinchilla 论文 (DeepMind, 2022)</a></li>
+  <li><a href="https://arxiv.org/abs/2206.07682">Emergent Abilities 论文 (Google, 2022)</a></li>
+  <li><a href="https://arxiv.org/abs/2304.15004">质疑涌现的 Stanford 论文 (2023)</a></li>
+  <li><a href="https://arxiv.org/abs/2401.04088">Mixtral of Experts (Mistral, 2024)</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0004-training-inference.html">← 第四课：训练 vs 推理</a>
+  <span>LLM 原理课程完结 🎉</span>
+</div>
+
+</body>
+</html>

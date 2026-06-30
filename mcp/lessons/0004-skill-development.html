@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0004 — Claude Code Skill 开发：从 system prompt 到完整 Skill</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0004: Claude Code Skill 开发</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 40 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：理解 Skill 的构成（YAML frontmatter + Markdown body + hooks），能独立开发一个可发布的自定义 Skill。
+</blockquote>
+
+<h2>1. Skill 的构成</h2>
+
+<p>一个 Skill 就是一个 Markdown 文件（<code>.md</code>），放在 <code>~/.claude/skills/</code> 目录（用户级）或项目的 <code>.claude/skills/</code> 目录（项目级）。</p>
+
+<pre><code>---                                                                  ← YAML frontmatter
+name: my-skill-name
+description: 一行描述，用于匹配触发条件
+allowed-tools: Bash, Read, Write, Edit
+metadata:
+  category: development
+---
+
+# Skill 标题                                                        ← Markdown body
+
+## Instructions
+
+你被激活后应当遵循的指令...
+</code></pre>
+
+<h2>2. Skill 的触发机制</h2>
+
+<p>Claude Code 通过 <strong>skill description 匹配</strong>来激活 Skill——不需要用户显式调用 <code>/skill-name</code>（虽然也可以）。当用户的消息与某个 Skill 的描述匹配时，Skill 被自动加载。</p>
+
+<p>这意味着 <strong>description 是 Skill 最重要的部分</strong>。它决定了 Skill 何时被激活。</p>
+
+<table>
+  <tr><th>Description 写法</th><th>激活场景</th></tr>
+  <tr><td><code>Use when the user wants to deploy to production</code></td><td>"部署到线上"、"发布"、"ship it"</td></tr>
+  <tr><td><code>Use when user needs to search, create, or manage notes in Obsidian</code></td><td>"帮我记个笔记"、"查一下之前的笔记"</td></tr>
+  <tr><td><code>Use when debugging hard bugs with systematic diagnosis loop</code></td><td>"debug一下"、"这有个bug"、"帮我排查"</td></tr>
+</table>
+
+<p>description 要宽到能触发，窄到不误触发。这是 Skill 设计中最难的部分。</p>
+
+<h2>3. 实战：写一个 Skill</h2>
+
+<p>场景：创建一个 Skill，让 Claude Code 在修改任何 Python 文件后自动运行测试。</p>
+
+<p>创建 <code>.claude/skills/auto-test.md</code>：</p>
+
+<pre><code>---
+name: auto-test
+description: Run pytest automatically after modifying Python files. Use when user edits .py files or asks to run tests.
+allowed-tools: Bash(pytest:*), Read
+hooks:
+  PostToolUse:
+    - matcher: Edit|Write
+      paths: ["*.py"]
+      hooks:
+        - command: ${CLAUDE_PLUGIN_ROOT}/hooks/run-tests.sh
+---
+
+# Auto Test Skill
+
+## When Activated
+
+After any Write or Edit to a Python file, run the project's test suite.
+
+## Behavior
+
+1. Detect which test file matches the changed source file
+2. Run `pytest <test_file> -x -q`
+3. Report results to the user
+
+## Configuration
+
+Set `TEST_COMMAND` env var to override the test runner (default: pytest).
+</code></pre>
+
+<p>创建 <code>.claude/skills/auto-test/hooks/run-tests.sh</code>：</p>
+
+<pre><code>#!/bin/bash
+# run-tests.sh — triggered after Python file edits
+set -e
+
+# Find matching test file
+CHANGED_FILE="$1"
+if [[ "$CHANGED_FILE" == *.py ]]; then
+    TEST_FILE="tests/test_$(basename $CHANGED_FILE)"
+    if [ -f "$TEST_FILE" ]; then
+        echo "→ 运行测试: $TEST_FILE"
+        python -m pytest "$TEST_FILE" -x -q 2>&1
+    else
+        echo "⚠️  未找到对应的测试文件: $TEST_FILE"
+    fi
+fi</code></pre>
+
+<h2>4. Skill 的钩子系统</h2>
+
+<table>
+  <tr><th>Hook 类型</th><th>触发时机</th><th>典型用途</th></tr>
+  <tr>
+    <td><code>PreToolUse</code></td>
+    <td>工具调用<strong>前</strong></td>
+    <td>权限检查、参数验证</td>
+  </tr>
+  <tr>
+    <td><code>PostToolUse</code></td>
+    <td>工具调用<strong>后</strong></td>
+    <td>自动测试、格式化、通知</td>
+  </tr>
+  <tr>
+    <td><code>Notification</code></td>
+    <td>特定事件发生时</td>
+    <td>长时间任务完成通知</td>
+  </tr>
+  <tr>
+    <td><code>UserPromptSubmit</code></td>
+    <td>用户提交消息时</td>
+    <td>注入上下文、前置检查</td>
+  </tr>
+  <tr>
+    <td><code>SessionStart</code></td>
+    <td>Session 开始时</td>
+    <td>加载项目状态、环境检查</td>
+  </tr>
+  <tr>
+    <td><code>Stop</code></td>
+    <td>Agent 停止时</td>
+    <td>清理资源、保存状态</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <strong>Skill 和 MCP 的关系：</strong>Skill 是给<strong>Claude 的指令和行为规则</strong>——"遇到这种情况怎么做"。MCP 是 Claude 的<strong>外部能力</strong>——"给你一个工具去调用"。Skill 可以调用 MCP 工具，MCP 工具可以被 Skill 使用。它们互补，不在同一层。
+</div>
+
+<h2>5. Skill 的最佳实践</h2>
+
+<ul>
+  <li><strong>Description 精心设计：</strong>包含触发词、场景、排除条件。写完后测试 5 个触发句子和 5 个不应该触发的句子。</li>
+  <li><strong>Skill 要短：</strong>正文控制在 200 行以内。Skill 加载到 context window，太长会挤占用户对话空间。</li>
+  <li><strong>分层设计：</strong>工具类 Skill (MCP Server) + 行为类 Skill (system prompt) + 编排类 Skill (hook)。不要让一个 Skill 做所有事。</li>
+  <li><strong>渐进式指令：</strong>从"必须做"→"应该做"→"可以做"，用 MUST/SHOULD/MAY 标注优先级。</li>
+</ul>
+
+<h2>6. Skill 目录结构参考</h2>
+
+<p>参考 superpowers 的 Skill 组织方式：</p>
+
+<pre><code>~/.claude/skills/
+├── superpowers:brainstorming/       ← 插件名:Skill 名
+│   ├── SKILL.md                     ← 主 Skill 文件
+│   └── references/                  ← 子引用文档
+│       └── brainstorming-guide.md
+├── my-custom-skill.md               ← 简单 Skill（单文件）
+└── auto-test/                       ← 复杂 Skill（多文件）
+    ├── SKILL.md
+    └── hooks/
+        └── run-tests.sh</code></pre>
+
+<h2>7. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"Skill 和 MCP 什么关系？"</td>
+    <td>Skill 定义行为和流程（"怎么做"），MCP 提供工具和数据（"用什么做"）。一个 Skill 可以调用多个 MCP Server 的工具。类比：Skill = playbook，MCP = toolkit。</td>
+  </tr>
+  <tr>
+    <td>"Skill 的权限模型？"</td>
+    <td>Skill 通过 allowed-tools 声明所需权限——只授予它需要的，不给多余的。这是最小权限原则。Hook 脚本独立运行，权限取决于脚本本身。</td>
+  </tr>
+  <tr>
+    <td>"怎么测试 Skill？"</td>
+    <td>1) 单元测试 hook 脚本 2) 用 eval prompt 验证 description 的触发准确性 3) 实际场景走查——触发前/中/后的完整流程。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>写一个 Skill：<code>git-guardian</code>——在 git push 之前检查是否有未提交的测试文件</li>
+    <li>把 LangChain Lesson 1 的天气 Agent 包装成一个 MCP Server，通过 Skill 自动激活</li>
+    <li>分析 superpowers 库中一个 Skill 的 description + body 结构，写出它的设计意图</li>
+  </ol>
+</div>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://docs.anthropic.com/en/docs/claude-code/skills">Claude Code Skills 官方文档</a></li>
+  <li><a href="https://github.com/anthropics/superpowers">Superpowers — 官方 Skill 库</a></li>
+  <li><a href="https://docs.claude.codes/claude-code/hooks">Claude Code Hooks 文档</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0003-resources-prompts-transport.html">← 第三课：Resources + Prompts</a>
+  <a href="0005-mcp-sdk-deep.html">第五课：MCP SDK 深入 →</a>
+</div>
+
+</body>
+</html>

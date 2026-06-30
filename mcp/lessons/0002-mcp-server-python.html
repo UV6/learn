@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002 — MCP Server 实战：用 Python SDK 写第一个 MCP 服务</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0002: MCP Server 实战</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 45 分钟 · 难度：中级</p>
+
+<blockquote>
+  本课目标：用 MCP Python SDK 从零实现一个 MCP Server，提供 Tool + Resource，并配置到 Claude Code 中实际使用。
+</blockquote>
+
+<h2>1. 项目初始化</h2>
+
+<pre><code>mkdir my-first-mcp && cd my-first-mcp
+python -m venv .venv
+source .venv/bin/activate
+pip install mcp</code></pre>
+
+<p>SDK 的核心类是：</p>
+<ul>
+  <li><code>mcp.server.Server</code> — MCP Server 主类</li>
+  <li><code>mcp.types.Tool</code> — 工具定义（name, description, inputSchema）</li>
+  <li><code>mcp.types.Resource</code> — 资源定义（uri, name, description, mimeType）</li>
+  <li><code>mcp.server.stdio.stdio_server()</code> — 通过 stdio 传输运行</li>
+</ul>
+
+<h2>2. 最简 MCP Server：Hello World</h2>
+
+<p>创建 <code>server.py</code>：</p>
+
+<pre><code>#!/usr/bin/env python3
+"""第一个 MCP Server — 提供天气查询和笔记读取"""
+
+import json
+from mcp.server import Server, NotificationOptions
+from mcp.server.models import InitializationCapabilities
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    Tool,
+    TextContent,
+    Resource,
+    ResourceTemplate,
+)
+
+# Step 1: 创建 Server 实例
+server = Server("weather-server")
+
+
+# Step 2: 定义能力
+@server.list_tools()
+async def handle_list_tools() -> list[Tool]:
+    """告诉 Client 我有什么工具"""
+    return [
+        Tool(
+            name="get_weather",
+            description="查询指定城市的当前天气",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "城市名称"
+                    }
+                },
+                "required": ["city"]
+            }
+        ),
+        Tool(
+            name="get_time",
+            description="查询指定城市的当前时间",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "城市名称"
+                    }
+                },
+                "required": ["city"]
+            }
+        ),
+    ]
+
+
+# Step 3: 实现工具调用
+@server.call_tool()
+async def handle_call_tool(
+    name: str, arguments: dict
+) -> list[TextContent]:
+    """处理工具调用请求"""
+
+    if name == "get_weather":
+        city = arguments["city"]
+        # 实际项目调天气 API
+        weather_data = {
+            "beijing": "sunny, 25°C",
+            "shanghai": "cloudy, 28°C",
+        }
+        result = weather_data.get(
+            city.lower(), f"No data for {city}"
+        )
+        return [TextContent(type="text", text=result)]
+
+    if name == "get_time":
+        from datetime import datetime
+        city = arguments["city"]
+        return [TextContent(
+            type="text",
+            text=f"Current time: {datetime.now().isoformat()}"
+        )]
+
+    raise ValueError(f"Unknown tool: {name}")
+
+
+# Step 4: 提供 Resource（可被 Client 读取的数据）
+@server.list_resources()
+async def handle_list_resources() -> list[Resource]:
+    """告诉 Client 我有什么数据资源"""
+    return [
+        Resource(
+            uri="weather://cities",
+            name="Supported Cities",
+            description="支持查询的城市列表",
+            mimeType="application/json",
+        ),
+    ]
+
+
+@server.read_resource()
+async def handle_read_resource(uri: str) -> str:
+    """读取资源内容"""
+    if uri == "weather://cities":
+        return json.dumps(
+            ["Beijing", "Shanghai", "Tokyo", "London"],
+            ensure_ascii=False,
+        )
+    raise ValueError(f"Unknown resource: {uri}")
+
+
+# Step 5: 启动 Server
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationCapabilities(
+                sampling=None,  # 本 Server 不需要调用 LLM
+                experimental=None,
+            ),
+        )
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())</code></pre>
+
+<h2>3. 配置到 Claude Code</h2>
+
+<p>在项目根目录创建 <code>.mcp.json</code>：</p>
+
+<pre><code>{
+  "mcpServers": {
+    "weather": {
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}</code></pre>
+
+<p>重启 Claude Code 后，Agent 自动发现 <code>get_weather</code> 和 <code>get_time</code> 两个新工具。</p>
+
+<div class="callout tip">
+  <strong>你已经在用 MCP：</strong>你的 Claude Code 里配置了 codegraph、playwright、context7 等 MCP 工具——它们就是这样运行的。你刚写的 server.py 和它们在一个水平上。
+</div>
+
+<h2>4. 代码走读：四个关键钩子</h2>
+
+<table>
+  <tr><th>装饰器</th><th>触发时机</th><th>返回值</th></tr>
+  <tr><td><code>@server.list_tools()</code></td><td>Client 首次连接时</td><td>Tool 列表（name + description + inputSchema）</td></tr>
+  <tr><td><code>@server.call_tool()</code></td><td>LLM 决定调用某个工具时</td><td>Tool 执行结果（TextContent 或 ImageContent）</td></tr>
+  <tr><td><code>@server.list_resources()</code></td><td>Client 请求资源列表时</td><td>Resource 列表（uri + name + mimeType）</td></tr>
+  <tr><td><code>@server.read_resource()</code></td><td>Client 读取某个资源时</td><td>资源内容（字符串或 bytes）</td></tr>
+</table>
+
+<p>和 LangChain 的 @tool 装饰器对比：</p>
+<ul>
+  <li><strong>LangChain @tool：</strong>装饰一个 Python 函数，自动提取 type hints 生成 schema</li>
+  <li><strong>MCP @server.call_tool：</strong>手动处理 name 和 arguments，需要显式 dispatch</li>
+  <li><strong>关键差异：</strong>MCP 的工具定义和工具实现是<strong>分离</strong>的——list_tools 返回 schema，call_tool 返回结果。LangChain 把它们合在一起。</li>
+</ul>
+
+<h2>5. 进阶：带认证的 HTTP MCP Server</h2>
+
+<p>stdio 适合本地开发，HTTP 适合共享服务：</p>
+
+<pre><code># 如果用 FastMCP (更高层封装)
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("Weather Server")
+
+@mcp.tool()
+async def get_weather(city: str) -> str:
+    """查询城市天气"""
+    return f"Sunny, 25°C in {city}"
+
+@mcp.resource("weather://cities")
+async def list_cities() -> str:
+    """支持的城市列表"""
+    return json.dumps(["Beijing", "Shanghai"])
+
+# 一行启动 HTTP 服务
+if __name__ == "__main__":
+    mcp.run(transport="sse", port=8000)</code></pre>
+
+<p>FastMCP 封装了 tools/list 和 call_tool 的样板代码——更像 LangChain 的 @tool 风格。</p>
+
+<h2>6. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"MCP SDK 和 FastMCP 的区别？"</td>
+    <td>SDK 是底层 API（手动 dispatch + 显式 schema 定义），FastMCP 是高层封装（@tool 自动生成 schema）。SDK 给框架开发者用，FastMCP 给应用开发者用。类比：SQLAlchemy Core vs ORM。</td>
+  </tr>
+  <tr>
+    <td>"MCP 工具怎么处理错误？"</td>
+    <td>返回一个包含错误信息的 TextContent（不要抛异常）。MCP 协议的 error 字段用于协议层错误（如 method not found），业务错误应该在 result 中返回。</td>
+  </tr>
+  <tr>
+    <td>"MCP 工具可以异步吗？"</td>
+    <td>可以，所有 handler 都是 async 的。Tool 调用本身就是 async——SDK 默认支持。</td>
+  </tr>
+</table>
+
+<h2>7. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>跑通上面的 server.py，配置 .mcp.json，在 Claude Code 中实际调用</li>
+    <li>加一个 Tool：<code>translate(text, target_lang)</code></li>
+    <li>把 LangChain 第一课的 get_weather 函数改造成 MCP Server——两个生态系统用同一个工具</li>
+  </ol>
+</div>
+
+<h2>8. 推荐阅读</h2>
+<ul>
+  <li><a href="https://github.com/modelcontextprotocol/python-sdk">MCP Python SDK — GitHub</a></li>
+  <li><a href="https://modelcontextprotocol.io/quickstart/server">MCP Server Quickstart</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0001-mcp-architecture.html">← 第一课：MCP 协议架构</a>
+  <a href="0003-mcp-resources-prompts.html">第三课：Resources + Prompts →</a>
+</div>
+
+</body>
+</html>

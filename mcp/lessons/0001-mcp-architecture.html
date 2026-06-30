@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001 — MCP 协议架构：为什么需要 MCP？</title>
+<link rel="stylesheet" href="../assets/shared.css">
+<style>
+  .arch { font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.35; background: #f0f4ff; border:1px solid var(--accent-dim); border-radius:8px; padding:1.2rem; margin:1rem 0; white-space:pre; overflow-x:auto; color:#1e3a5f; }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0001: MCP 协议架构</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中级</p>
+
+<blockquote>
+  本课目标：理解 MCP 解决了什么问题、协议的分层架构、以及 MCP 和其他工具集成方案（Function Calling, Plugin）的本质区别。
+</blockquote>
+
+<h2>1. Before MCP：AI 工具集成的碎片化</h2>
+
+<p>在 MCP 之前，每个 LLM 平台有自己的工具定义格式：</p>
+
+<pre><code>OpenAI:    function_call + JSON Schema tools
+Anthropic: tool_use + XML-style input_schema
+Google:    function_declaration + OpenAPI-ish
+LangChain: @tool decorator → 内部转换 → provider-specific format</code></pre>
+
+<p>问题：<strong>每写一次工具，要适配 N 种格式。没有统一的工具"语言"。</strong></p>
+
+<p>MCP 解决的是：<strong>定义一种开放的、跨平台的工具协议——Server 实现一次，所有 Client 都能用。</strong></p>
+
+<div class="callout">
+  <strong>一句话：</strong>MCP 之于 AI 工具，就像 HTTP 之于 Web 服务——它是一个标准协议，让任何 AI 客户端都能发现和调用任何 MCP 服务器提供的能力。
+</div>
+
+<h2>2. MCP 的分层架构</h2>
+
+<div class="arch">
+┌─────────────────────────────────────────────────────┐
+│                   MCP Architecture                   │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐   │
+│  │              Application Layer                │   │
+│  │  What you build: Tools, Resources, Prompts    │   │
+│  ├──────────────────────────────────────────────┤   │
+│  │              Protocol Layer                   │   │
+│  │  JSON-RPC 2.0 messages                       │   │
+│  │  · tools/list · resources/read · prompts/get │   │
+│  ├──────────────────────────────────────────────┤   │
+│  │              Transport Layer                  │   │
+│  │  · stdio (本地进程间通信)                     │   │
+│  │  · HTTP + SSE (远程服务)                      │   │
+│  └──────────────────────────────────────────────┘   │
+│                                                      │
+│  Client (Claude Desktop/Code, Cursor, ...)          │
+│                  ↕ JSON-RPC over stdio/HTTP         │
+│  Server (your code: 数据库查询、API 封装、文件操作) │
+└─────────────────────────────────────────────────────┘
+</div>
+
+<table>
+  <tr><th>层</th><th>做什么</th><th>你接触什么</th></tr>
+  <tr>
+    <td><strong>Application</strong></td>
+    <td>定义 Server 提供的能力</td>
+    <td>Tools（可调用的函数）、Resources（可读取的数据）、Prompts（预设提示词模板）</td>
+  </tr>
+  <tr>
+    <td><strong>Protocol</strong></td>
+    <td>Client 和 Server 之间怎么对话</td>
+    <td>JSON-RPC 2.0 格式的 request/response/notification</td>
+  </tr>
+  <tr>
+    <td><strong>Transport</strong></td>
+    <td>消息怎么传输</td>
+    <td>stdio（本地）或 HTTP+SSE（远程）</td>
+  </tr>
+</table>
+
+<h2>3. MCP 的三种能力：Tools、Resources、Prompts</h2>
+
+<table>
+  <tr><th>类型</th><th>方向</th><th>类比</th><th>示例</th></tr>
+  <tr>
+    <td><strong>Tools</strong></td>
+    <td>Client → Server (调用)</td>
+    <td>RPC / function call</td>
+    <td><code>search_code(query)</code>、<code>create_issue(title, body)</code></td>
+  </tr>
+  <tr>
+    <td><strong>Resources</strong></td>
+    <td>Client ← Server (读取)</td>
+    <td>REST GET</td>
+    <td><code>file://project/README.md</code>、<code>db://users/schema</code></td>
+  </tr>
+  <tr>
+    <td><strong>Prompts</strong></td>
+    <td>Client ← Server (模板)</td>
+    <td>预置 prompt</td>
+    <td><code>code-review</code> 触发标准的代码审查 prompt</td>
+  </tr>
+</table>
+
+<div class="callout tip">
+  <strong>关键区分：</strong>Tool 是"模型主动决定调用"（模型说"我需要搜索结果"），Resource 是"模型被动读取"（模型说"给我看一下那个文件"）。前者是<strong>行动</strong>，后者是<strong>数据</strong>。Prompt 是两者的粘合剂——预设的场景模板。
+</div>
+
+<h2>4. JSON-RPC 2.0：MCP 的通信语言</h2>
+
+<p>MCP 的所有消息都是 JSON-RPC 2.0 格式。我们只需要了解三种消息类型：</p>
+
+<pre><code>// 1. Request — Client 发给 Server
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+ "params": {"name": "get_weather", "arguments": {"city": "Beijing"}}}
+
+// 2. Response — Server 返回给 Client
+{"jsonrpc": "2.0", "id": 1,
+ "result": {"content": [{"type": "text", "text": "晴朗，25°C"}]}}
+
+// 3. Notification — 单向消息（不需要回复）
+{"jsonrpc": "2.0", "method": "notifications/initialized"}</code></pre>
+
+<p>Protocol 层定义的<strong>核心方法（面试必知）</strong>：</p>
+
+<table>
+  <tr><th>方法</th><th>类型</th><th>用途</th></tr>
+  <tr><td><code>initialize</code></td><td>Request</td><td>Client 连接 Server，交换能力信息</td></tr>
+  <tr><td><code>tools/list</code></td><td>Request</td><td>获取 Server 提供的所有 Tool</td></tr>
+  <tr><td><code>tools/call</code></td><td>Request</td><td>调用一个具体的 Tool</td></tr>
+  <tr><td><code>resources/read</code></td><td>Request</td><td>读取一个 Resource 的内容</td></tr>
+  <tr><td><code>resources/list</code></td><td>Request</td><td>列出所有可用 Resource</td></tr>
+  <tr><td><code>prompts/get</code></td><td>Request</td><td>获取一个 Prompt 模板</td></tr>
+  <tr><td><code>notifications/tools/list_changed</code></td><td>Notification</td><td>Server 通知 Client 工具列表变了</td></tr>
+</table>
+
+<h2>5. Transport 层：stdio vs HTTP</h2>
+
+<table>
+  <tr><th></th><th>stdio</th><th>HTTP + SSE</th></tr>
+  <tr><td>适用</td><td>本地工具（Claude Code, VS Code 插件）</td><td>远程服务、Web 应用</td></tr>
+  <tr><td>启动方式</td><td>Client 启动 Server 进程</td><td>Server 作为 HTTP 服务运行</td></tr>
+  <tr><td>通信</td><td>stdin/stdout 管道</td><td>HTTP POST + Server-Sent Events</td></tr>
+  <tr><td>配置</td><td>一行命令</td><td>需要 URL + 可选认证</td></tr>
+  <tr><td>延迟</td><td>极低（本地进程）</td><td>网络延迟</td></tr>
+</table>
+
+<p>大多数开发场景用 stdio——在你的 <code>claude_desktop_config.json</code> 或 <code>.mcp.json</code> 中配一条命令就行。下节课会实战。</p>
+
+<h2>6. MCP vs Function Calling vs Plugin：三者的关系</h2>
+
+<table>
+  <tr><th></th><th>MCP</th><th>Function Calling</th><th>Plugin</th></tr>
+  <tr><td>是什么</td><td>开放协议</td><td>LLM 的一个特性</td><td>平台生态</td></tr>
+  <tr><td>定义者</td><td>Anthropic（开源）</td><td>各 LLM 厂商</td><td>各平台</td></tr>
+  <tr><td>跨平台</td><td>✅ 是（目标）</td><td>❌ 格式不统一</td><td>❌ 平台绑定</td></tr>
+  <tr><td>发现机制</td><td>tools/list 自动发现</td><td>手动在 API 调用中传入</td><td>平台商店安装</td></tr>
+  <tr><td>传输</td><td>stdio + HTTP</td><td>HTTP API</td><td>平台内部</td></tr>
+  <tr><td>权限</td><td>用户批准</td><td>依赖平台</td><td>安装时授权</td></tr>
+</table>
+
+<div class="callout">
+  <strong>面试金句：</strong>"MCP 和 Function Calling 不在同一层。Function Calling 是 LLM 判断'要不要调工具'的能力，MCP 是工具'如何被发现和调用'的协议。MCP Server 的工具最终通过 Function Calling 机制被 LLM 调用——它们是协作关系，不是替代关系。"
+</div>
+
+<h2>7. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"为什么不直接用 REST API？"</td>
+    <td>REST API 需要 LLM 理解 URL 结构、HTTP 方法、认证方式——每个 API 都是独特的。MCP 统一了工具的描述格式（JSON Schema），LLM 只需要理解一种"语言"。而且 MCP 的 tools/list 提供了自动发现，REST API 需要手动写文档。</td>
+  </tr>
+  <tr>
+    <td>"MCP 的安全性怎么保证？"</td>
+    <td>三层：(1) Transport 层隔离——stdio 天然进程隔离，只有 localhost (2) 用户批准——每次工具调用都需要用户确认（类似 sudo）(3) Server 端权限——Server 自己实现访问控制。Claude Code 目前所有工具调用都需要用户授权。</td>
+  </tr>
+  <tr>
+    <td>"MCP 的局限性？"</td>
+    <td>(1) 协议还在演进，生态不够成熟 (2) stdio transport 不适合分布式场景 (3) 没有内置的认证/鉴权标准 (4) 大文件传输需要走 Resource 而非 Tool 返回值 (5) 目前主要是文本输入输出，二进制/流式支持有限。</td>
+  </tr>
+  <tr>
+    <td>"你怎么看待 MCP 的竞争？"</td>
+    <td>OpenAI 的 Plugins 已停止发展，Google 的 A2A (Agent-to-Agent) 协议聚焦 Agent 间通信而非工具调用——MCP 和 A2A 是互补的。MCP 作为开源标准有先发优势和社区采纳（Claude, Cursor, Zed, Sourcegraph 等都已支持）。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>列出你日常使用的 Claude Code MCP 工具（如 codegraph、playwright），分别标注它们是 Tool、Resource 还是 Prompt</li>
+    <li>手写一段 JSON-RPC 2.0 的 tools/list request 和 response（假设 Server 有一个 get_weather tool）</li>
+    <li>想一个场景：如果让你设计一个 MCP Server，你会用它暴露什么能力？</li>
+  </ol>
+</div>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://modelcontextprotocol.io/">MCP 协议官网</a></li>
+  <li><a href="https://spec.modelcontextprotocol.io/">MCP 协议规范</a></li>
+  <li><a href="https://modelcontextprotocol.io/docs/concepts/architecture">MCP Architecture 概念文档</a></li>
+</ul>
+
+<div class="nav">
+  <span></span>
+  <a href="0002-mcp-server-python.html">第二课：MCP Server 实战 →</a>
+</div>
+
+</body>
+</html>

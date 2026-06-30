@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002 — GPT 自回归生成：next-token prediction 的完整机制</title>
+<link rel="stylesheet" href="../assets/shared.css">
+<style>
+  .arch-diagram { font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.35; background: #f0f4ff; border:1px solid var(--accent-dim); border-radius:8px; padding:1rem; margin:1rem 0; white-space:pre; overflow-x:auto; color:#1e3a5f; }
+  .formula { text-align:center; font-size:1.1rem; margin:1rem 0; padding:0.5rem; background:var(--code-bg); border-radius:6px; }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0002: GPT 自回归生成</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中级偏高</p>
+
+<blockquote>
+  本课目标：理解 GPT 的自回归生成机制——为什么是 next-token prediction、masked attention 怎么工作、temperature/top-p/top-k 控制什么、以及训练和推理阶段的区别。
+</blockquote>
+
+<h2>1. GPT 的核心思想：一切皆是 next-token prediction</h2>
+
+<p>面试最常问："GPT 的训练目标是什么？"</p>
+
+<p>答案：<strong>自回归语言建模 (Autoregressive Language Modeling)</strong>——给定前面的 token，预测下一个 token。</p>
+
+<div class="formula">
+  P(x<sub>1</sub>, x<sub>2</sub>, ..., x<sub>n</sub>) = ∏ P(x<sub>i</sub> | x<sub>1</sub>, ..., x<sub>i-1</sub>)
+</div>
+
+<p>训练时，给模型前半句，让它预测后半句。这个简单的目标在足够大的数据上训练后，产生了惊人的能力。</p>
+
+<div class="callout">
+  <strong>关键洞察：</strong>GPT 把<strong>所有 NLP 任务都统一为 next-token prediction</strong>。翻译？"Translate to French: Hello → " → 预测 "Bonjour"。总结？"Summarize: [长文] → TL;DR:" → 预测摘要。代码生成？"def fib(n):" → 预测函数体。这就是 in-context learning 的本质——不需要改模型，只需要改 prompt。
+</div>
+
+<h2>2. Masked Self-Attention：只看左边</h2>
+
+<p>GPT 不能偷看未来。Masked Attention 通过一个上三角 mask 矩阵实现：</p>
+
+<div class="arch-diagram">
+  句子："I love AI"
+  Tokens: [I, love, AI]
+
+  注意力矩阵 (Q·K<sup>T</sup>)：         + Mask (-∞ 上三角)：
+
+         I   love  AI                 I   love  AI
+     I [0.8  0.5  0.3]            I [0.8  -∞   -∞ ]
+  love [0.5  0.9  0.7]    →    love [0.5  0.9  -∞ ]
+    AI [0.3  0.7  0.9]             AI [0.3  0.7  0.9]
+
+  经过 softmax(mask)：            含义：
+     I [1.0  0    0  ]            I 只能看到自己
+  love [0.3  0.7  0  ]            love 能看到 I 和自己
+    AI [0.2  0.3  0.5]            AI 能看到所有前面的词
+</div>
+
+<p>这就是 Chat GPT "一个词一个词往外蹦"的原因——每生成一个 token，它就追加到序列末尾，成为下一个预测的输入。</p>
+
+<h2>3. 推理过程：Autoregressive Generation</h2>
+
+<p>训练和推理的差异是面试高频题：</p>
+
+<table>
+  <tr><th></th><th>训练 (Training)</th><th>推理 (Inference)</th></tr>
+  <tr><td>输入</td><td>完整序列（teacher forcing）</td><td>逐 token 生成</td></tr>
+  <tr><td>并行性</td><td>全序列并行计算 attention</td><td>每次只能算一个新 token</td></tr>
+  <tr><td>瓶颈</td><td>显存（batch × seq_len）</td><td>KV Cache 大小（线性增长）</td></tr>
+  <tr><td>优化</td><td>混合精度、梯度累积</td><td>KV Cache、speculative decoding</td></tr>
+  <tr><td>关键操作</td><td>Cross-entropy loss → 更新权重</td><td>采样策略（temperature/top-p/top-k）</td></tr>
+</table>
+
+<div class="arch-diagram">
+  ┌── 推理循环 ──────────────────────────────────────────┐
+  │                                                        │
+  │  Step 1: 输入 "Today is"                                │
+  │           → 前向传播 → 预测概率分布 → 采样 → "a"       │
+  │                                                        │
+  │  Step 2: 输入 "Today is a"                              │
+  │           → 前向传播 → 预测概率分布 → 采样 → "sunny"   │
+  │                                                        │
+  │  Step 3: 输入 "Today is a sunny"                        │
+  │           → 前向传播 → 预测概率分布 → 采样 → "day"     │
+  │                                                        │
+  │  ...直到生成 EOS token 或达到 max_length                │
+  │                                                        │
+  │  ⚠️ 每次都重新计算全序列的 attention！                  │
+  │  💡 KV Cache 缓解这个问题（见 Lesson 4）               │
+  └────────────────────────────────────────────────────────┘
+</div>
+
+<h2>4. 采样策略：控制生成的"创造性"</h2>
+
+<p>GPT 每一步输出的是概率分布（vocab_size 维的向量）。怎么从分布中选一个 token？</p>
+
+<table>
+  <tr><th>策略</th><th>做法</th><th>效果</th></tr>
+  <tr>
+    <td><strong>Greedy</strong></td>
+    <td>每次选概率最高的 token</td>
+    <td>确定性的，但容易重复、无聊</td>
+  </tr>
+  <tr>
+    <td><strong>Temperature</strong></td>
+    <td>softmax(z / T)，T>1 拉平分布，T&lt;1 锐化分布</td>
+    <td>T=0.7 温和创造；T=1.5 放飞自我</td>
+  </tr>
+  <tr>
+    <td><strong>Top-K</strong></td>
+    <td>只从概率最高的 K 个 token 中采样</td>
+    <td>K=50：排除低概率的噪音 token</td>
+  </tr>
+  <tr>
+    <td><strong>Top-P (Nucleus)</strong></td>
+    <td>从累积概率 ≥ P 的最小集合中采样</td>
+    <td>比 Top-K 更灵活——动态调整候选集大小</td>
+  </tr>
+</table>
+
+<div class="callout tip">
+  <strong>生产环境最佳实践：</strong>Temperature=0（greedy）用于事实性任务（代码、数学），Temperature=0.7 + Top-P=0.9 用于创意写作。Top-K 和 Top-P 不要同时用——通常 Top-P 更优。
+</div>
+
+<h2>5. 为什么 GPT 能"理解"指令？从 GPT-1 到 GPT-4 的演进</h2>
+
+<table>
+  <tr><th>模型</th><th>关键创新</th><th>解决什么问题</th></tr>
+  <tr><td>GPT-1 (2018)</td><td>预训练 + 有监督微调</td><td>证明 Transformer decoder 做语言建模有效</td></tr>
+  <tr><td>GPT-2 (2019)</td><td>Zero-shot transfer + 更大的规模</td><td>"语言模型就是多任务学习器"——不需要微调</td></tr>
+  <tr><td>GPT-3 (2020)</td><td>In-context learning (175B)</td><td>few-shot prompt 替代微调，涌现能力出现</td></tr>
+  <tr><td>GPT-3.5/InstructGPT</td><td>RLHF (人类反馈强化学习)</td><td>对齐——让模型遵循意图、拒绝有害请求</td></tr>
+  <tr><td>GPT-4 (2023)</td><td>多模态 + 更大的规模</td><td>图像理解、更复杂的推理</td></tr>
+</table>
+
+<div class="callout">
+  <strong>面试框架：</strong>GPT 的演进是三个阶段——(1) 预训练阶段：学习世界知识，next-token prediction (2) 对齐阶段：RLHF 让人工偏好注入模型 (3) 推理阶段：通过 prompt engineering 和 tool use 扩展能力。面试官想听的是你理解这三个阶段的边界。
+</div>
+
+<h2>6. 面试高频追问</h2>
+
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>Teacher Forcing 是什么？</td>
+    <td>训练时把正确答案（而非上一步的输出）作为下一步的输入。即使模型预测错了也不影响后续——因为 ground truth 被"强制"喂入。这让训练并行，但造成了训练-推理的分布偏差（exposure bias）。</td>
+  </tr>
+  <tr>
+    <td>GPT 为什么不 bidirectional？</td>
+    <td>生成任务是因果性的——你不能用未来的词来预测当前词（信息泄露）。BERT 做了双向 attention，但它不做生成。如果用 BERT 生成，每个 token 的预测是独立的，没有连贯性。</td>
+  </tr>
+  <tr>
+    <td>自回归 vs 非自回归？</td>
+    <td>自回归：逐 token 生成，慢但连贯。非自回归：一次输出全部 token，快但质量差。目前所有主流 LLM 都是自回归的，非自回归是研究热点但未实用。</td>
+  </tr>
+  <tr>
+    <td>为什么 GPT-3 的 few-shot 有效？</td>
+    <td>大规模预训练让模型学会了"模式匹配"——给定 few-shot example 后，模型在 context 中找到了最匹配的 pattern，直接复现。这不是真的"学习"，而是更高效的 pattern completion。</td>
+  </tr>
+</table>
+
+<h2>7. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li><strong>手算 softmax + temperature：</strong>给定 logits=[2.0, 1.0, 0.1]，分别算 T=1.0 和 T=0.5 时的概率分布，体会温度的影响</li>
+    <li><strong>运行 nanoGPT：</strong>clone Karpathy 的 nanoGPT，跑一次推理，观察 next-token prediction 的每一步输出</li>
+    <li><strong>对比采样：</strong>同一个 prompt，分别用 greedy、T=0.7、T=1.5 生成三次，观察何时开始分叉</li>
+  </ol>
+</div>
+
+<h2>8. 关键术语</h2>
+<table>
+  <tr><td>Autoregressive</td><td>生成方式：P(tₙ | t₁, ..., tₙ₋₁)，一步一个</td></tr>
+  <tr><td>Teacher Forcing</td><td>训练时用 ground truth 作为输入，加速训练</td></tr>
+  <tr><td>Masked Attention</td><td>上三角 -∞ mask，防止看到未来 token</td></tr>
+  <tr><td>Temperature</td><td>控制 softmax 的"锐度"，调创造性</td></tr>
+  <tr><td>Top-P Sampling</td><td>从累积概率 ≥ P 的集合中采样，动态截断</td></tr>
+  <tr><td>In-Context Learning</td><td>通过 prompt 中的示例"教会"模型，无需微调</td></tr>
+  <tr><td>RLHF</td><td>用人类偏好训练 reward model，再优化 policy</td></tr>
+  <tr><td>EOS Token</td><td>序列结束标记，告诉模型"停"</td></tr>
+</table>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://jalammar.github.io/illustrated-gpt2/">The Illustrated GPT-2 — 图解 GPT 内部</a></li>
+  <li><a href="https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf">GPT-2 论文 (Radford et al., 2019)</a></li>
+  <li><a href="https://arxiv.org/abs/2005.14165">GPT-3 论文 (Brown et al., 2020)</a></li>
+  <li><a href="https://www.youtube.com/watch?v=kCc8FmEb1nY">Karpathy: Let's build GPT（视频教程）</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>自回归生成是 LLM 推理的基石。下一课看 LLaMA 怎么用 RoPE、RMSNorm、GQA 在工程上优化 GPT 架构。随时问助教。
+</div>
+
+<div class="nav">
+  <a href="0001-transformer-architecture.html">← 第一课：Transformer 架构</a>
+  <a href="0003-llama-improvements.html">第三课：LLaMA 改进 →</a>
+</div>
+
+</body>
+</html>

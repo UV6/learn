@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0007 — 流式输出与可观测性</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0007: 流式输出与可观测性</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中级</p>
+
+<blockquote>
+  本课目标：掌握 Agent 的 streaming 输出（从 agent.stream() 到自定义 streaming events），理解生产环境的可观测性体系（LangSmith tracing、token tracking、错误监控）。
+</blockquote>
+
+<h2>1. 为什么需要 Streaming？</h2>
+
+<p>面试场景题："用户反馈 Agent 响应太慢（10 秒才出第一个字），怎么优化？"</p>
+
+<p>答案：<strong>用 streaming 让用户看到逐字输出——感知延迟从 10 秒降到 0.5 秒。</strong></p>
+
+<p>但实际上 streaming 不止改善体验：</p>
+<ul>
+  <li><strong>中断控制：</strong>用户可以中途停止生成（看到方向不对就打断）</li>
+  <li><strong>节省成本：</strong>用户提前中断 → 不再生成后续 token → 省 token</li>
+  <li><strong>可观测性：</strong>流式事件暴露了内部状态——tool 调用时机、推理步骤</li>
+</ul>
+
+<h2>2. LangChain 的 Streaming 层次</h2>
+
+<table>
+  <tr><th>层级</th><th>API</th><th>返回什么</th><th>场景</th></tr>
+  <tr>
+    <td>Token 级</td>
+    <td><code>model.stream()</code></td>
+    <td>逐 token 的 AIMessageChunk</td>
+    <td>聊天 UI 打字机效果</td>
+  </tr>
+  <tr>
+    <td>Agent 级</td>
+    <td><code>agent.stream()</code></td>
+    <td>每个步骤的事件流</td>
+    <td>Agent 执行过程可视化</td>
+  </tr>
+  <tr>
+    <td>Graph 级</td>
+    <td><code>graph.stream()</code></td>
+    <td>每个节点的状态变更</td>
+    <td>LangGraph 工作流监控</td>
+  </tr>
+  <tr>
+    <td>事件级</td>
+    <td><code>graph.astream_events()</code></td>
+    <td>所有内部事件</td>
+    <td>自定义 UI、调试工具</td>
+  </tr>
+</table>
+
+<h2>3. 三种 Streaming 的实际代码</h2>
+
+<h3>3.1 Token 级 Streaming</h3>
+<pre><code># 逐 token 输出
+for chunk in model.stream("写一首关于AI的诗"):
+    print(chunk.content, end="", flush=True)
+# 输出：人 工 智 能 如 朝 阳 ， ...
+
+# 在 Agent 中使用（需要先 stream_mode="messages"）
+for chunk in agent.stream(
+    {"messages": [{"role": "user", "content": "北京天气？"}]},
+    stream_mode="messages"
+):
+    if isinstance(chunk, AIMessageChunk):
+        print(chunk.content, end="", flush=True)</code></pre>
+
+<h3>3.2 Agent 级 Streaming (stream_mode)</h3>
+<pre><code># stream_mode 控制返回粒度
+# "values" — 每步的完整 State（默认）
+# "updates" — 每步 State 的变更
+# "messages" — 直接拿到 LLM token
+# "custom" — 自定义事件
+
+for chunk in agent.stream(input, stream_mode="updates"):
+    # chunk 是 {node_name: node_output}
+    for node_name, output in chunk.items():
+        print(f"[{node_name}] {output}")
+# 输出：
+# [agent] {'messages': [AIMessage(tool_calls=[...])]}
+# [tools]  {'messages': [ToolMessage("晴朗，25°C")]}
+# [agent] {'messages': [AIMessage("北京今天天气晴朗...")]}
+</code></pre>
+
+<h3>3.3 Graph 级 Streaming + 自定义事件</h3>
+<pre><code># LangGraph 的 stream 展示每个 node 的执行
+for event in graph.stream(initial_state, config):
+    # event = {node_name: state_update}
+    node_name = list(event.keys())[0]
+    print(f"→ 执行节点: {node_name}")
+# 输出：
+# → 执行节点: decide
+# → 执行节点: search
+# → 执行节点: answer
+</code></pre>
+
+<div class="callout tip">
+  <strong>面试加分：</strong>"除了改善用户体验，streaming 的另一大价值是让 Agent 的内部决策过程对用户透明。用户可以看到 Agent 在调用哪个 tool、思考了什么——这对建立信任至关重要。金融、医疗场景中，这甚至是合规要求。"
+</div>
+
+<h2>4. 可观测性体系</h2>
+
+<p>生产环境中，"Agent 为什么给出了这个答案？"——这个问题必须可回答。</p>
+
+<table>
+  <tr><th>维度</th><th>工具</th><th>回答什么问题</th></tr>
+  <tr>
+    <td><strong>Tracing</strong></td>
+    <td>LangSmith, OpenTelemetry</td>
+    <td>这次调用的完整链路是什么？</td>
+  </tr>
+  <tr>
+    <td><strong>Token Tracking</strong></td>
+    <td>LangSmith, callback handler</td>
+    <td>花了多少 token？哪个环节最费？</td>
+  </tr>
+  <tr>
+    <td><strong>Error Tracking</strong></td>
+    <td>Sentry, LangSmith runs</td>
+    <td>Tool 调用失败了多少次？为什么？</td>
+  </tr>
+  <tr>
+    <td><strong>Cost Tracking</strong></td>
+    <td>LangSmith, custom callback</td>
+    <td>这次对话花了多少钱？</td>
+  </tr>
+  <tr>
+    <td><strong>Quality Evaluation</strong></td>
+    <td>LangSmith eval, RAGAS</td>
+    <td>回答质量如何？有没有幻觉？</td>
+  </tr>
+  <tr>
+    <td><strong>Latency Profiling</strong></td>
+    <td>LangSmith, custom timing</td>
+    <td>哪个环节最慢？LLM 推理？Tool 调用？</td>
+  </tr>
+</table>
+
+<h2>5. LangSmith 快速集成</h2>
+
+<pre><code># .env 中设置
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=ls_...
+LANGCHAIN_PROJECT=my-agent
+
+# 之后所有 agent.invoke() 和 graph.stream() 自动上报 trace
+# 不需要改任何应用代码！
+
+# LangSmith dashboard 可以看：
+# - 每次调用的完整 trace（LLM 调用、tool 执行、retriever 查询）
+# - Token 消耗和延迟分布
+# - 错误率和重试次数
+# - 用户反馈（👍👎）汇总
+</code></pre>
+
+<h2>6. 自建监控：Callback Handler</h2>
+
+<p>如果不用 LangSmith，可以用 LangChain 的 callback 自己收集：</p>
+
+<pre><code>from langchain.callbacks import BaseCallbackHandler
+
+class MetricsHandler(BaseCallbackHandler):
+    def __init__(self):
+        self.total_tokens = 0
+        self.total_cost = 0
+        self.tool_calls = 0
+        self.llm_calls = 0
+
+    def on_llm_end(self, response, **kwargs):
+        self.llm_calls += 1
+        tokens = response.llm_output["token_usage"]["total_tokens"]
+        self.total_tokens += tokens
+
+    def on_tool_end(self, output, **kwargs):
+        self.tool_calls += 1
+
+# 使用
+handler = MetricsHandler()
+agent.invoke(input, config={"callbacks": [handler]})
+print(f"LLM calls: {handler.llm_calls}, Toolkit calls: {handler.tool_calls}")
+print(f"Total tokens: {handler.total_tokens}")
+</code></pre>
+
+<h2>7. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"怎么监控 Agent 的质量？"</td>
+    <td>分两层：(1) 技术指标——延迟 P50/P99、错误率、token 消耗、tool 调用成功率 (2) 质量指标——用户满意度（👍👎）、答案准确性（人工抽检或 LLM-as-judge）、幻觉率。用 LangSmith 的 annotation queue 做持续评估。</td>
+  </tr>
+  <tr>
+    <td>"Token 成本怎么优化？"</td>
+    <td>五招：1) 缩短 system prompt 2) 多 Agent 分层用不同模型（便宜的做路由）3) context window 管理（摘要压缩）4) 缓存常见问题的答案 5) streaming 让用户提前中断。</td>
+  </tr>
+  <tr>
+    <td>"LangSmith vs 自建？"</td>
+    <td>LangSmith 是 LangChain 生态的一部分，集成成本为零。适合快速原型和中型项目。大规模部署时可能需要自建（成本、数据隐私），但架构参考 LangSmith 的设计——trace 树 + run metadata。</td>
+  </tr>
+  <tr>
+    <td>"怎么 debug Agent 的决策？"</td>
+    <td>三件套：(1) LangSmith trace 看完整调用链 (2) stream_mode="updates" 看每步的 State 变更 (3) 在关键 node 中打印 state 快照。面试时强调"可调试性比美观更重要"能加分。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>修改第一课的 weather agent，用 <code>agent.stream()</code> + <code>stream_mode="messages"</code> 实现打字机效果</li>
+    <li>给 Agent 加一个 MetricsHandler callback，统计一次对话中的 LLM 调用次数和 tool 调用次数</li>
+    <li>注册 LangSmith 账号（免费 tier），跑一次 Agent 调用，看 dashboard 的 trace 树</li>
+  </ol>
+</div>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/streaming">LangChain Streaming 文档</a></li>
+  <li><a href="https://docs.smith.langchain.com/">LangSmith 官方文档</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/how-tos/streaming">LangGraph Streaming 文档</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0006-pattern-comparison.html">← 第六课：模式对比</a>
+  <a href="0008-final-project.html">第八课：综合项目实战 →</a>
+</div>
+
+</body>
+</html>

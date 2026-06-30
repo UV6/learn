@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0008 — 综合项目实战：智能客服系统</title>
+<link rel="stylesheet" href="../assets/shared.css">
+<style>
+  .arch { font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.4; background: #f0f4ff; border:1px solid var(--accent-dim); border-radius:8px; padding:1.2rem; margin:1rem 0; white-space:pre; overflow-x:auto; color:#1e3a5f; }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0008: 综合项目实战</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 60 分钟 + 自主开发 · 难度：高级</p>
+
+<blockquote>
+  本课目标：用前七课的所有知识，设计并实现一个完整的「智能客服系统」——可以直接放到 GitHub 上作为面试项目展示。
+</blockquote>
+
+<h2>1. 项目概述</h2>
+
+<div class="arch">
+┌──────────────────────────────────────────────────────┐
+│                   Intelligent CS Agent               │
+│                                                      │
+│  ┌─────────┐    ┌──────────────────────────────┐    │
+│  │  User   │───→│       Supervisor Agent        │    │
+│  │  Query  │    │  (gpt-4o-mini, 只做路由)      │    │
+│  └─────────┘    └──────┬───────┬───────┬───────┘    │
+│                        │       │       │            │
+│               ┌────────┘  ┌────┘  ┌───┘            │
+│               ↓           ↓       ↓                │
+│       ┌────────────┐ ┌──────────┐ ┌─────────────┐  │
+│       │ FAQ Agent  │ │Order Agent│ │ General     │  │
+│       │ (RAG 检索) │ │(Tool+审批)│ │ (对话+兜底) │  │
+│       └─────┬──────┘ └────┬─────┘ └──────┬──────┘  │
+│             │             │              │          │
+│       ┌─────↓──────┐ ┌────↓─────┐       │          │
+│       │ FAISS      │ │ Order DB │       │          │
+│       │ (产品文档) │ │ (模拟)   │       │          │
+│       └────────────┘ └──────────┘       │          │
+│             │             │              │          │
+│             └─────────────┴──────────────┘          │
+│                          ↓                          │
+│                  ┌──────────────┐                   │
+│                  │Supervisor汇总│                   │
+│                  │  → Final ANS │                   │
+│                  └──────────────┘                   │
+└──────────────────────────────────────────────────────┘
+</div>
+
+<p>这个系统集成了前七课的核心理念：</p>
+
+<table>
+  <tr><th>组件</th><th>对应课程</th><th>核心技术</th></tr>
+  <tr><td>FAQ Agent</td><td>Lesson 2 (RAG)</td><td>TextLoader → Splitter → Embedding → FAISS → Retrieval Chain</td></tr>
+  <tr><td>Order Agent</td><td>Lesson 1 + 4</td><td>BaseTool (查询/退款) + interrupt (退款审批)</td></tr>
+  <tr><td>General Agent</td><td>Lesson 1</td><td>create_agent（基础对话 + 兜底）</td></tr>
+  <tr><td>Supervisor</td><td>Lesson 3 + 5 + 6</td><td>StateGraph + 条件边 + 子 Agent node</td></tr>
+  <tr><td>Memory</td><td>Lesson 4</td><td>MemorySaver + thread_id 持久化</td></tr>
+  <tr><td>Streaming</td><td>Lesson 7</td><td>graph.stream() + 前端可视化</td></tr>
+</table>
+
+<h2>2. 项目结构</h2>
+
+<pre><code>cs-agent/
+├── .env                    # API keys
+├── requirements.txt        # pip install -r requirements.txt
+├── knowledge/
+│   └── products.txt        # 产品手册（FAQ Agent 的知识库）
+├── src/
+│   ├── __init__.py
+│   ├── main.py             # 入口：构建图 + 交互式对话
+│   ├── state.py            # State 定义
+│   ├── supervisor.py       # Supervisor node + router
+│   ├── agents/
+│   │   ├── __init__.py
+│   │   ├── faq_agent.py    # FAQ (RAG) Agent
+│   │   ├── order_agent.py  # 订单处理 Agent
+│   │   └── general_agent.py # 通用对话 Agent
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── order_tools.py  # order 相关的 BaseTool
+│   │   └── rag_tool.py     # RAG 检索 tool（可选）
+│   └── utils/
+│       ├── __init__.py
+│       ├── model.py        # 统一模型初始化
+│       └── callback.py     # Metrics callback
+├── tests/
+│   ├── test_faq.py
+│   ├── test_order.py
+│   └── test_supervisor.py
+└── README.md               # GitHub 展示用的项目说明
+</code></pre>
+
+<h2>3. 核心代码骨架</h2>
+
+<h3>3.1 State 定义</h3>
+<pre><code># src/state.py
+from typing import TypedDict, Annotated, Literal
+from langgraph.graph.message import add_messages
+
+class CSAgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    user_query: str
+    intent: str                    # "faq" | "order" | "general"
+    faq_result: str                # FAQ Agent 的检索结果
+    order_result: str              # Order Agent 的处理结果
+    pending_approval: dict | None  # 待审批的操作
+    final_answer: str
+    next: str                      # supervisor 的路由决策</code></pre>
+
+<h3>3.2 FAQ Agent 实现</h3>
+<pre><code># src/agents/faq_agent.py
+from langchain_community.document_loaders import TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+
+def build_faq_chain(model):
+    # 加载产品文Knowledge
+    loader = TextLoader("knowledge/products.txt", encoding="utf-8")
+    docs = loader.load()
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    chunks = splitter.split_documents(docs)
+
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-zh-v1.5")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """基于以下产品信息回答问题。找不到就说不知道。
+产品信息：{context}"""),
+        ("human", "{input}"),
+    ])
+
+    combine_chain = create_stuff_documents_chain(model, prompt)
+    return create_retrieval_chain(retriever, combine_chain)
+
+def faq_agent_node(state):
+    chain = build_faq_chain(model)
+    result = chain.invoke({"input": state["user_query"]})
+    return {"faq_result": result["answer"]}</code></pre>
+
+<h3>3.3 Order Agent 实现</h3>
+<pre><code># src/agents/order_agent.py
+from langchain_core.tools import BaseTool
+from langgraph.types import interrupt
+from pydantic import BaseModel, Field
+
+# --- Tools ---
+class OrderLookupInput(BaseModel):
+    order_id: str = Field(description="订单号，格式 ORD-XXXXX")
+
+class OrderLookupTool(BaseTool):
+    name = "lookup_order"
+    description = "查询订单状态。输入订单号。"
+    args_schema = OrderLookupInput
+
+    def _run(self, order_id: str) -> str:
+        # 模拟数据库查询
+        orders = {
+            "ORD-12345": "已发货，预计6月30日到达",
+            "ORD-67890": "处理中，预计7月2日发货",
+        }
+        return orders.get(order_id, f"未找到订单 {order_id}")
+
+class RefundInput(BaseModel):
+    order_id: str = Field(description="要退款的订单号")
+    reason: str = Field(description="退款原因")
+
+class RefundTool(BaseTool):
+    name = "process_refund"
+    description = "处理退款。需要主管审批。"
+    args_schema = RefundInput
+
+    def _run(self, order_id: str, reason: str) -> str:
+        # 触发人工审批
+        approval = interrupt(
+            f"退款请求：订单 {order_id}，原因：{reason}。批准？"
+        )
+        if approval == "approved":
+            return f"订单 {order_id} 已退款。退款金额将在3-5个工作日到账。"
+        return f"订单 {order_id} 退款已拒绝。"
+
+def order_agent_node(state):
+    # 用 create_react_agent + order tools
+    agent = create_react_agent(
+        model, [OrderLookupTool(), RefundTool()],
+        system_prompt="你是客服订单专员。处理查询和退款。"
+    )
+    result = agent.invoke({"messages": state["messages"]})
+    return {"order_result": result["messages"][-1].content}</code></pre>
+
+<h3>3.4 Supervisor 实现</h3>
+<pre><code># src/supervisor.py
+from langgraph.graph import StateGraph, START, END
+
+MEMBERS = ["faq_agent", "order_agent", "general_agent"]
+
+SUPERVISOR_PROMPT = """你是客服路由系统。根据用户问题，决定分发给谁：
+- faq_agent: 产品问题、功能咨询、价格、使用说明
+- order_agent: 订单查询、退款、物流
+- general_agent: 问候、闲聊、无法分类的问题
+
+回复格式：只回复 agent 名称或 FINISH。"""
+
+def supervisor_node(state):
+    response = model.invoke([
+        {"role": "system", "content": SUPERVISOR_PROMPT},
+        {"role": "user", "content": state["user_query"]},
+    ])
+    return {"next": response.content.strip(), "intent": response.content.strip()}
+
+def router(state):
+    if state["next"] == "FINISH":
+        return "__end__"
+    if state["next"] in MEMBERS:
+        return state["next"]
+    return "general_agent"  # fallback
+
+# --- 构建图 ---
+from src.agents.faq_agent import faq_agent_node
+from src.agents.order_agent import order_agent_node
+from src.agents.general_agent import general_agent_node
+from langgraph.checkpoint.memory import MemorySaver
+
+builder = StateGraph(CSAgentState)
+builder.add_node("supervisor", supervisor_node)
+builder.add_node("faq_agent", faq_agent_node)
+builder.add_node("order_agent", order_agent_node)
+builder.add_node("general_agent", general_agent_node)
+
+builder.add_edge(START, "supervisor")
+builder.add_conditional_edges("supervisor", router)
+builder.add_edge("faq_agent", "supervisor")     # 干完活回 supervisor
+builder.add_edge("order_agent", "supervisor")
+builder.add_edge("general_agent", "supervisor")
+
+graph = builder.compile(checkpointer=MemorySaver())</code></pre>
+
+<h3>3.5 交互式入口</h3>
+<pre><code># src/main.py
+if __name__ == "__main__":
+    config = {"configurable": {"thread_id": "demo-001"}}
+
+    print("🤖 智能客服系统已启动 (输入 'quit' 退出)\n")
+
+    while True:
+        query = input("👤 你: ")
+        if query.lower() == "quit":
+            break
+
+        print("🤖 客服: ", end="", flush=True)
+
+        for event in graph.stream(
+            {"messages": [{"role": "user", "content": query}],
+             "user_query": query},
+            config,
+            stream_mode="updates",
+        ):
+            # 实时展示 agent 切换
+            node = list(event.keys())[0]
+            if node == "supervisor":
+                intent = event[node].get("intent", "")
+                print(f"\n[路由到: {intent}]", end="")
+            elif node in MEMBERS:
+                print(f"\n[{node}] ", end="")
+            # ... 流式输出最终答案 ...
+
+        print("\n")</code></pre>
+
+<h2>4. README.md 模板（面试用）</h2>
+
+<pre><code># 智能客服系统 (Intelligent CS Agent)
+
+基于 LangChain + LangGraph 的多 Agent 协作客服系统，支持产品FAQ、订单处理、退款审批。
+
+## 架构
+- **Supervisor Agent**: 意图识别 + 路由分发
+- **FAQ Agent**: RAG 检索增强（FAISS + BGE Embedding）
+- **Order Agent**: 订单查询 + 退款（Human-in-the-Loop 审批）
+- **General Agent**: 通用对话兜底
+
+## 技术栈
+- LangChain: Agent 创建、Tool 定义、RAG 管道
+- LangGraph: StateGraph、条件路由、Checkpointing
+- FAISS + HuggingFace Embeddings: 本地向量检索
+- DeepSeek API: LLM 推理
+
+## 核心特性
+- ✅ 多 Agent 协作（Supervisor 路由模式）
+- ✅ Human-in-the-Loop（退款审批）
+- ✅ Streaming 响应（实时反馈）
+- ✅ 持久化对话记忆（MemorySaver）
+- ✅ 可观测性（Callback + token tracking）
+
+## 运行
+```bash
+pip install -r requirements.txt
+cp .env.example .env  # 填入 DEEPSEEK_API_KEY
+python src/main.py
+```
+
+## 面试展示要点
+- 能解释为什么选 Supervisor 模式而非单 Agent
+- 能说明 interrupt() 的 Human-in-the-Loop 机制
+- 能展示 RAG 管道各环节的调参思路
+- 能对比多 Agent 和单 Agent 的延迟/cost tradeoff
+</code></pre>
+
+<h2>5. 面试展示指南</h2>
+
+<div class="callout">
+  <strong>面试时怎么讲这个项目（5 分钟版本）：</strong><br>
+  1. (1min) 一句话说清楚做了什么 + 架构图<br>
+  2. (1min) 为什么选 Supervisor 模式——"客户意图可预定义，需要集中控制"<br>
+  3. (1min) 展示一个亮点——比如 interrupt() 退款审批、或 RAG 管道的调参<br>
+  4. (1min) 技术挑战——context window 管理、多 Agent 延迟优化<br>
+  5. (1min) 如果重做——会用 DPO 替代 RLHF、加 LangSmith tracing
+</div>
+
+<h2>6. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 你的任务</h3>
+  <ol>
+    <li>按本课结构创建 <code>cs-agent/</code> 项目，写出完整可运行代码</li>
+    <li>写一份 products.txt 知识库（你自己的项目/公司场景）</li>
+    <li>跑通 5 个测试用例：FAQ查询、订单查询、退款审批、闲聊、混合查询</li>
+    <li>Push 到 GitHub，写 README</li>
+    <li>做一个 5 分钟的演示视频或 live demo</li>
+  </ol>
+</div>
+
+<h2>7. 扩展方向（面试加分）</h2>
+<table>
+  <tr><th>方向</th><th>技术</th></tr>
+  <tr><td>混合检索</td><td>BM25 + Vector 双路检索 + Reranker 精排</td></tr>
+  <tr><td>多语言</td><td>多语言 embedding + 翻译 tool</td></tr>
+  <tr><td>RAG 评估</td><td>RAGAS 框架评估 faithfulness + relevance</td></tr>
+  <tr><td>前端 UI</td><td>Streamlit / Gradio / Next.js chat interface</td></tr>
+  <tr><td>Web 服务</td><td>FastAPI 包装 + Docker 部署</td></tr>
+  <tr><td>生产 Checkpointer</td><td>SqliteSaver / PostgresSaver</td></tr>
+</table>
+
+<h2>8. 全部课程回顾</h2>
+<table>
+  <tr><th>#</th><th>课程</th><th>你学会的</th></tr>
+  <tr><td>1</td><td>Hello Agent</td><td>create_agent, Tool 定义, Agent Loop</td></tr>
+  <tr><td>2</td><td>RAG 全流程</td><td>Load→Split→Embed→Store→Retrieve→Generate</td></tr>
+  <tr><td>3</td><td>LangGraph 工作流</td><td>StateGraph, 条件边, 循环节点</td></tr>
+  <tr><td>4</td><td>Tools + Memory</td><td>@tool/BaseTool, Checkpointer, interrupt, 记忆类型</td></tr>
+  <tr><td>5</td><td>多 Agent 协作</td><td>Supervisor, Subagent, Subgraph 三种模式</td></tr>
+  <tr><td>6</td><td>模式对比</td><td>选型决策框架, 混合架构设计</td></tr>
+  <tr><td>7</td><td>流式与可观测性</td><td>Streaming 四层, LangSmith, Callback</td></tr>
+  <tr><td>8</td><td>综合项目</td><td>智能客服系统——从零到 GitHub</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>🎉 恭喜！</strong> 你已经完成了从「Java 后端」到「AI Agent 应用开发」的转型课程。八个课时覆盖了 LangChain 生态的核心能力和面试高频考点。唯一的剩下一件事：<strong>动手写代码，把它变成你自己的项目。</strong>
+</div>
+
+<div class="nav">
+  <a href="0007-streaming-observability.html">← 第七课：流式与可观测性</a>
+  <span>LangChain 课程完结 🎉</span>
+</div>
+
+</body>
+</html>

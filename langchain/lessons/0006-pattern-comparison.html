@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0006 — 模式对比：Supervisor vs Subagent vs 单 Agent 选型决策</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0006: 架构模式对比与选型</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：系统对比三种 Agent 架构模式，建立选型决策框架，能在面试中清晰回答"你选哪个方案，为什么？"
+</blockquote>
+
+<h2>1. 三种模式的本质差异</h2>
+
+<p>前几课我们有讨论 Supervsior 和 Subagent 的区别。现在把它们和单 Agent 放在同一维度下对比：</p>
+
+<table>
+  <tr><th></th><th>单 Agent</th><th>Supervisor</th><th>Subagent</th></tr>
+  <tr><td><strong>控制流</strong></td><td>LLM 内部决策（黑盒）</td><td>显式 Graph 边（白盒）</td><td>LLM tool_choice（灰盒）</td></tr>
+  <tr><td><strong>决策者</strong></td><td>同一个 LLM</td><td>专门的 Supervisor LLM</td><td>主 Agent 的 LLM</td></tr>
+  <tr><td><strong>路由机制</strong></td><td>function calling</td><td>条件边 (router function)</td><td>function calling（子 Agent = Tool）</td></tr>
+  <tr><td><strong>Context 隔离</strong></td><td>共享一个 context</td><td>每个 Agent 独立 context</td><td>每个 Agent 独立 context</td></tr>
+  <tr><td><strong>并行能力</strong></td><td>串行调 tool</td><td>Graph 支持并行 node</td><td>依赖主 Agent 的调用顺序</td></tr>
+  <tr><td><strong>调试难度</strong></td><td>简单（看 messages）</td><td>中等（看 state transitions）</td><td>困难（嵌套 Agent 的 messages）</td></tr>
+  <tr><td><strong>延迟</strong></td><td>1 个 Agent loop</td><td>多个 Agent 串行 + Supervisor 开销</td><td>主 Agent loop + 子 Agent loop</td></tr>
+  <tr><td><strong>Token 消耗</strong></td><td>只有 1 套 system prompt</td><td>N 套 system prompt</td><td>N 套 system prompt</td></tr>
+  <tr><td><strong>灵活性</strong></td><td>低（固定 tool 列表）</td><td>中（预定义 Agent 类型）</td><td>高（动态委托给任意子 Agent）</td></tr>
+  <tr><td><strong>安全控制</strong></td><td>难（所有操作同权）</td><td>强（每 Agent 独立权限）</td><td>中（子 Agent 可设独立权限）</td></tr>
+</table>
+
+<h2>2. 选型决策树</h2>
+
+<pre><code>问题 1: 任务类型是否可预定义？
+  ├── 是 (如：客服、技术支持、销售)
+  │     └── 问题 2: 各任务间有严格的执行顺序？
+  │           ├── 是 → Supervisor + 条件边序列
+  │           └── 否 → Supervisor + 自由路由
+  │
+  └── 否 (如：用户随便问，Agent 自己判断)
+        └── 问题 3: 单个 Agent 的 tool 数量是否 > 10？
+              ├── 是 → Subagent 委托（避免 context 过载）
+              └── 否 → 单 Agent (create_agent)</code></pre>
+
+<h2>3. 各模式的代码复杂度对比</h2>
+
+<p>面试官可能让你现场设计："给你一个场景，怎么写代码？"——这是对你工程判断力的考查。</p>
+
+<table>
+  <tr><th>模式</th><th>最少代码行数</th><th>核心复杂度</th></tr>
+  <tr><td>单 Agent</td><td>~20 行</td><td>只需定义 tool + create_agent</td></tr>
+  <tr><td>Supervisor</td><td>~80 行</td><td>多 Agent node + router function + 循环控制</td></tr>
+  <tr><td>Subagent</td><td>~50 行</td><td>子 Agent 包装为 @tool + system prompt 设计</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>工程判断力：</strong>面试时先问自己——"这个场景用 create_agent 能不能搞定？"能就不要引入多 Agent。每次多一个 Agent，就多一套 system prompt、多一个延迟源、多一层调试复杂度。最简单的方案就是最好的方案，直到被证伪。
+</div>
+
+<h2>4. 混合架构：生产环境的真实形态</h2>
+
+<p>生产环境很少是"纯"某一种模式。最常见的是 <strong>Supervisor + Subagent 混合</strong>：</p>
+
+<pre><code>                    ┌──────────────┐
+                    │  Supervisor  │
+                    └──┬───┬───┬──┘
+                       │   │   │
+           ┌───────────┘   │   └───────────┐
+           ↓               ↓               ↓
+    ┌────────────┐  ┌────────────┐  ┌────────────┐
+    │  客服 Agent │  │  订单 Agent │  │  技术 Agent │
+    │  (单Agent)  │  │ (Subagent) │  │ (Supervisor │
+    │             │  │            │  │   嵌套)     │
+    │ tools:      │  │ tools:     │  │            │
+    │ - search_kb │  │ - refund   │  │  ┌─Code    │
+    │ - escalate  │  │ - lookup   │  │  ├─Search  │
+    └────────────┘  │ - code_    │  │  └─Review  │
+                    │   reviewer │  └────────────┘
+                    └────────────┘</code></pre>
+
+<p>每层可以用不同的模型（成本优化）：</p>
+<ul>
+  <li><strong>Supervisor</strong> — 便宜模型（GPT-4o-mini / haiku）只做路由</li>
+  <li><strong>客服 Agent</strong> — 便宜模型，响应快</li>
+  <li><strong>技术 Agent</strong> — 强模型（sonnet / GPT-4o），推理重</li>
+  <li><strong>子 Agent (code reviewer)</strong> — 强模型，安全要求高</li>
+</ul>
+
+<h2>5. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"你之前项目为什么选 XX 模式？"</td>
+    <td>用决策树回答——先描述场景特征（任务是否可预定义、tool 数量、安全要求），再映射到模式选择。展示你是有决策框架的，不是拍脑袋。</td>
+  </tr>
+  <tr>
+    <td>"如果 Supervsior 路由错了怎么办？"</td>
+    <td>三层防御：(1) 子 Agent 的 system prompt 中有边界检查——不属于自己领域的拒绝处理，返回给 Supervisor (2) Supervisor 设重试上限 (3) 加 fallback node——路由失败时直接给人或给通用 Agent。</td>
+  </tr>
+  <tr>
+    <td>"多 Agent 的延迟怎么优化？"</td>
+    <td>(1) 并行 node（LangGraph 原生支持）(2) 子 Agent 用小模型 (3) Supervisor 缓存——相同类型的任务不用每次都决策 (4) 减少不必要的 Agent 间通信——子 Agent 直接输出结果，不需要层层汇报。</td>
+  </tr>
+  <tr>
+    <td>"Subagent 嵌套太深怎么办？"</td>
+    <td>设置最大深度限制。超过 2 层嵌套通常是设计问题——检查是否应该合并某些 Agent 或用 Supervisor 模式替代。生产环境一般不超过 2 层。</td>
+  </tr>
+</table>
+
+<h2>6. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习：设计你自己的选型决策</h3>
+  <ol>
+    <li>给定场景："智能招聘助手——简历筛选、技能评估、面试题生成、薪资建议"。画架构图，标注每个 Agent 用什么模式，解释为什么。</li>
+    <li>把 Lesson 3 的 LangGraph 研究 Agent 重构成 Supervisor 模式——加一个 Supervisor 判断先搜索还是先直接回答</li>
+    <li>对比单 Agent、Supervisor、Subagent 在处理 3 个 tool 的延迟和 token 消耗（可以心算）</li>
+  </ol>
+</div>
+
+<h2>7. 推荐阅读</h2>
+<ul>
+  <li><a href="https://docs.langchain.com/oss/python/langchain/multi-agent">LangChain Multi-Agent 官方文档</a></li>
+  <li><a href="https://docs.langchain.com/oss/python/langgraph/workflows-agents">LangGraph Agent Workflows</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0005-multi-agent.html">← 第五课：多 Agent 协作</a>
+  <a href="0007-streaming-observability.html">第七课：流式与可观测性 →</a>
+</div>
+
+</body>
+</html>

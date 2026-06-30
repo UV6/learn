@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0003 — LLaMA 改进：RoPE, RMSNorm, SwiGLU, GQA</title>
+<link rel="stylesheet" href="../assets/shared.css">
+<style>
+  .formula { text-align:center; font-size:1.1rem; margin:1rem 0; padding:0.5rem; background:var(--code-bg); border-radius:6px; }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0003: LLaMA 的工程改进</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 40 分钟 · 难度：中高级</p>
+
+<blockquote>
+  本课目标：理解 LLaMA/LLaMA 2 相比原始 Transformer 的四个关键改进——RoPE、RMSNorm、SwiGLU、GQA——以及它们解决了什么问题。
+</blockquote>
+
+<h2>1. 原始 Transformer → 现代 LLM 的进化</h2>
+
+<p>LLaMA (Meta, 2023) 是当前最流行的开源 LLM 架构。它的设计哲学是：<strong>保持核心不变，优化每一个组件。</strong></p>
+
+<table>
+  <tr><th>组件</th><th>原始 Transformer</th><th>LLaMA</th><th>为什么改？</th></tr>
+  <tr>
+    <td>位置编码</td>
+    <td>Sinusoidal / Learned</td>
+    <td><strong>RoPE</strong></td>
+    <td>更好的外推（训练 2K，推理 32K）</td>
+  </tr>
+  <tr>
+    <td>归一化</td>
+    <td>LayerNorm (Post-Norm)</td>
+    <td><strong>RMSNorm (Pre-Norm)</strong></td>
+    <td>更快、更稳定</td>
+  </tr>
+  <tr>
+    <td>激活函数</td>
+    <td>ReLU / GELU</td>
+    <td><strong>SwiGLU</strong></td>
+    <td>更好的训练效果</td>
+  </tr>
+  <tr>
+    <td>Attention</td>
+    <td>Multi-Head Attention</td>
+    <td><strong>GQA (Grouped Query Attention)</strong></td>
+    <td>推理时省 KV Cache</td>
+  </tr>
+</table>
+
+<hr>
+
+<h2>2. RoPE：旋转位置编码</h2>
+
+<h3>问题</h3>
+<p>Sinusoidal Positional Encoding 是"加到 embedding 上"的绝对位置编码。它不能很好地处理<strong>相对位置</strong>——"cat"和"sit"之间的距离信息在 attention 计算中丢失了。</p>
+
+<p>Learned Positional Encoding 则无法外推——如果训练时最大长度 2048，推理时输入 5000 token 就会出错。</p>
+
+<h3>RoPE 的直觉</h3>
+<p>RoPE (Rotary Position Embedding) 的核心思想：<strong>通过旋转向量来编码位置，让两个向量的点积自然地包含相对位置信息。</strong></p>
+
+<div class="formula">
+  f(Q, m) = Q · R<sub>m</sub>, &emsp; f(K, n) = K · R<sub>n</sub><br>
+  f(Q, m)·f(K, n)<sup>T</sup> = Q·R<sub>m-n</sub>·K<sup>T</sup>
+</div>
+
+<p>R<sub>m</sub> 是一个旋转矩阵，把向量按维度对的频率旋转 m 个角度。结果是：<strong>Q 和 K 的点积只依赖它们的相对位置 (m-n)</strong>。</p>
+
+<div class="callout">
+  <strong>面试精炼：</strong>"RoPE 通过旋转变换把绝对位置转换成相对位置信息。它有两个优势：(1) 相对位置自然地出现在 attention 计算中 (2) 支持长度外推——训练 2K 推理 8K 甚至 32K，通过插值频率或在长数据上继续训练即可。"
+</div>
+
+<h3>RoPE 的实际表现</h3>
+<ul>
+  <li>频率随维度指数衰减——低维度捕捉长距离依赖，高维度捕捉局部依赖</li>
+  <li>外推能力来自"插值"——把位置 ID 线性缩小，让模型"以为"自己仍在训练长度内</li>
+  <li>已被几乎所有开源模型采用：LLaMA, Mistral, Qwen, DeepSeek, InternLM</li>
+</ul>
+
+<hr>
+
+<h2>3. RMSNorm：轻量级归一化</h2>
+
+<h3>LayerNorm 做了什么</h3>
+<div class="formula">
+  LayerNorm(x) = γ · (x - μ) / σ + β
+</div>
+<p>μ 是均值，σ 是标准差。减去均值 + 缩放——计算量大。</p>
+
+<h3>RMSNorm 的简化</h3>
+<div class="formula">
+  RMSNorm(x) = γ · x / RMS(x), &emsp; RMS(x) = √(mean(x²))
+</div>
+<p>只除以 RMS（均方根），<strong>不减均值</strong>。实验证明：</p>
+<ul>
+  <li>效果和 LayerNorm 几乎一样</li>
+  <li>计算量减少约 10-15%</li>
+  <li>梯度更稳定（没有均值减法的漂移）</li>
+</ul>
+
+<h3>Pre-Norm</h3>
+<p>原始 Transformer：<code>x + Sublayer(LayerNorm(x))</code> (Post-Norm, 残差外面做 norm)</p>
+<p>LLaMA：<code>x + Sublayer(RMSNorm(x))</code> (Pre-Norm, 残差里面做 norm)</p>
+<p>Pre-Norm 让训练更稳定——梯度不经过 LayerNorm 的缩放，直接从残差通路传播。现代模型全用 Pre-Norm。</p>
+
+<hr>
+
+<h2>4. SwiGLU：更好的激活函数</h2>
+
+<h3>从 ReLU 到 SwiGLU</h3>
+
+<table>
+  <tr><th>激活函数</th><th>公式</th><th>问题</th></tr>
+  <tr><td>ReLU</td><td>max(0, x)</td><td>负区间完全死掉（梯度=0）</td></tr>
+  <tr><td>GELU</td><td>x·Φ(x) 近似</td><td>平滑但没有门控</td></tr>
+  <tr><td><strong>SwiGLU</strong></td><td>(x·W<sub>1</sub> · Swish(x·W<sub>2</sub>))·W<sub>3</sub></td><td>门控 + 非线性 = 更好</td></tr>
+</table>
+
+<div class="callout">
+  <strong>直觉：</strong>SwiGLU 引入了一个"门控"机制——一个线性变换的结果经过 Swish 后作为"门"去控制另一个线性变换的结果。类似于 LSTM 的门控思想，但更简单高效。PaLM、LLaMA、Gemma 的实验都证明了它优于 GELU。
+</div>
+
+<p>值得一提的是：SwiGLU 的中间维度通常设为 8/3 × d_model（而非原始 FFN 的 4×），因为有三个权重矩阵而非两个，需要缩小以保持参数量相近。</p>
+
+<hr>
+
+<h2>5. GQA：Grouped Query Attention</h2>
+
+<h3>动机：KV Cache 是推理瓶颈</h3>
+
+<p>Multi-Head Attention 每层存 h 组 KV 向量。对于 LLaMA 70B（80 层，h=64, d_model=8192），单个 token 的 KV Cache 约 2.5GB。长上下文推理时这就是内存瓶颈。</p>
+
+<h3>三种 Attention 对比</h3>
+
+<table>
+  <tr><th></th><th>MHA (Multi-Head)</th><th>MQA (Multi-Query)</th><th><strong>GQA (Grouped Query)</strong></th></tr>
+  <tr><td>Q 头数</td><td>h</td><td>h</td><td>h</td></tr>
+  <tr><td>KV 头数</td><td>h</td><td>1</td><td><strong>g (1 < g < h)</strong></td></tr>
+  <tr><td>KV Cache</td><td>大（h 份 KV）</td><td>小（1 份 KV）</td><td><strong>中等（g 份 KV）</strong></td></tr>
+  <tr><td>质量</td><td>最好</td><td>有损</td><td><strong>接近 MHA</strong></td></tr>
+</table>
+
+<div class="arch-diagram">
+  MHA:  Q₁Q₂Q₃Q₄ → K₁K₂K₃K₄ → 每头独立 KV (4 份)
+  MQA:  Q₁Q₂Q₃Q₄ → K  (共享)  → 所有头共享 1 份 KV
+  GQA:  Q₁Q₂│Q₃Q₄ → K₁│K₂     → 每 2 头共享 1 份 KV (2 份)
+</div>
+
+<p>LLaMA 2 70B 用 GQA(g=8, h=64)，KV Cache 缩小 8 倍，推理质量无明显下降。</p>
+
+<div class="callout tip">
+  <strong>面试金句：</strong>"GQA 是 MHA 和 MQA 的折中——保留了多头 Q 的表达能力，同时减少 KV Cache。这展示了现代 LLM 设计的核心 tradeoff：推理效率 vs 模型质量。LLaMA 2 论文证明了 g=8 几乎无损。"
+</div>
+
+<hr>
+
+<h2>6. 四个改进的协同效应</h2>
+
+<p>LLaMA 的设计不是随机堆砌改进——它们之间形成了协同：</p>
+
+<ul>
+  <li><strong>RoPE + GQA：</strong>RoPE 提供长上下文的位置编码 → GQA 减少长上下文的 KV Cache 开销 → 组合后长上下文推理变得可行</li>
+  <li><strong>RMSNorm(Pre-Norm) + SwiGLU：</strong>Pre-Norm 让深层梯度稳定 → SwiGLU 在稳定梯度下更好地学习 → 可以堆更深（70B 模型)的层</li>
+</ul>
+
+<h2>7. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>RoPE vs ALiBi？</td>
+    <td>两种都支持长度外推。ALiBi 是加 bias 到 attention score（简单粗暴），RoPE 是旋转位置编码（更优雅）。RoPE 在长上下文微调后效果更好，ALiBi 零样本外推更强。当前趋势是 RoPE 胜出。</td>
+  </tr>
+  <tr>
+    <td>为什么不用 BatchNorm？</td>
+    <td>BatchNorm 依赖 batch 统计量，推理时用训练的平均值。NLP 序列长度不一，batch 统计量不稳定。LayerNorm/RMSNorm 在 feature 维度归一化，不受序列长度和 batch size 影响。</td>
+  </tr>
+  <tr>
+    <td>SwiGLU 比 GELU 好多少？</td>
+    <td>同等参数量下，SwiGLU 的 perplexity 下降约 2-5%。关键不是绝对数值，而是它引入了 gating——让模型可以"选择性"地传递信息，类似 LSTM 的门控。</td>
+  </tr>
+  <tr>
+    <td>LLaMA 和 GPT 的架构差异？</td>
+    <td>本质都是 decoder-only transformer。GPT-3 用 Learned PE + LayerNorm + GELU + MHA；LLaMA 用 RoPE + RMSNorm + SwiGLU + GQA。LLaMA 的改进都是工程优化，不改变自回归生成的核心逻辑。</td>
+  </tr>
+</table>
+
+<h2>8. 动手练习</h2>
+<div class="practice">
+  <h3>🛠 练习</h3>
+  <ol>
+    <li>去 HuggingFace 下载 LLaMA 2 7B 的 config.json，对照课件找出这四个改进在配置中的体现（rope_theta, rms_norm_eps, num_key_value_heads 等）</li>
+    <li>推导：为什么不直接推 SwiGLU 优于 GELU，而是说同等参数下更好？（提示：SwiGLU 多了一个 W 参数矩阵）</li>
+    <li>手算 GQA：LLaMA 2 70B 有 64 个 attention heads、8 个 KV groups。每 group 多少个 Q head？</li>
+  </ol>
+</div>
+
+<h2>9. 推荐阅读</h2>
+<ul>
+  <li><a href="https://arxiv.org/abs/2302.13971">LLaMA 论文 (Touvron et al., 2023)</a></li>
+  <li><a href="https://arxiv.org/abs/2307.09288">LLaMA 2 论文 — GQA 细节在 Section 2.4</a></li>
+  <li><a href="https://arxiv.org/abs/2104.09864">RoPE 论文 (Su et al., 2021)</a></li>
+  <li><a href="https://arxiv.org/abs/2002.05202">SwiGLU 论文 (Shazeer, 2020)</a></li>
+</ul>
+
+<div class="followup">
+  <strong>💬 有疑问？</strong>这四个改进是面试的高频区分点——背公式不够，要能说出每个改进解决了什么具体问题。
+</div>
+
+<div class="nav">
+  <a href="0002-gpt-autoregressive.html">← 第二课：GPT 自回归</a>
+  <a href="0004-training-inference.html">第四课：训练 vs 推理 →</a>
+</div>
+
+</body>
+</html>

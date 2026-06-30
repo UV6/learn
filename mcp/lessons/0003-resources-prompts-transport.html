@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0003 — Resources + Prompts + Transport 深入</title>
+<link rel="stylesheet" href="../assets/shared.css">
+</head>
+<body>
+
+<h1>Lesson 0003: Resources, Prompts, Transport 深入</h1>
+<p class="lesson-meta">2026-06-30 · 预计时间 35 分钟 · 难度：中级偏高</p>
+
+<blockquote>
+  本课目标：深入 MCP 的 Resources（动态数据暴露）、Prompts（模板复用）、Transport（stdio/HTTP/SSE 的选择），以及 Resource Templates 的 URI 参数化。
+</blockquote>
+
+<h2>1. Resources 进阶：不仅仅是静态文件</h2>
+
+<p>Resource 可以暴露任何数据——数据库查询结果、API 返回、文件内容、系统状态：</p>
+
+<pre><code># 动态 Resource：数据库查询结果
+@server.list_resources()
+async def list_resources() -> list[Resource]:
+    return [
+        Resource(
+            uri="db://users/count",
+            name="User Count",
+            description="当前注册用户总数",
+            mimeType="text/plain",
+        ),
+        Resource(
+            uri="system://status",
+            name="System Status",
+            description="CPU、内存、磁盘状态",
+            mimeType="application/json",
+        ),
+    ]
+
+@server.read_resource()
+async def read_resource(uri: str) -> str:
+    if uri == "db://users/count":
+        # 实际项目查数据库
+        count = db.query("SELECT COUNT(*) FROM users")
+        return str(count)
+
+    if uri == "system://status":
+        import psutil
+        return json.dumps({
+            "cpu": psutil.cpu_percent(),
+            "memory": psutil.virtual_memory().percent,
+            "disk": psutil.disk_usage("/").percent,
+        })
+</code></pre>
+
+<h2>2. Resource Templates：参数化 URI</h2>
+
+<p>当 Resource 有参数时（如"用户 X 的订单"），用 ResourceTemplate：</p>
+
+<pre><code>from mcp.types import ResourceTemplate
+
+@server.list_resources()
+async def list_resources():
+    return [
+        # 固定 Resource
+        Resource(uri="orders://all", name="All Orders"),
+
+        # 参数化 Resource — uri 中包含 {参数}
+        ResourceTemplate(
+            uriTemplate="orders://users/{user_id}",
+            name="User Orders",
+            description="某个用户的所有订单",
+            mimeType="application/json",
+        ),
+    ]
+
+@server.read_resource()
+async def read_resource(uri: str):
+    # 解析 URI 参数
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+
+    if uri == "orders://all":
+        return json.dumps(get_all_orders())
+
+    if parsed.scheme == "orders" and parsed.netloc == "users":
+        # orders://users/42 → user_id = 42
+        user_id = parsed.path.strip("/")
+        return json.dumps(get_orders_for_user(user_id))
+</code></pre>
+
+<p>LLM 可以根据上下文自动构建参数化 URI——"查一下用户 42 的订单" → 自动请求 <code>orders://users/42</code>。</p>
+
+<h2>3. Prompts：可复用的模板</h2>
+
+<p>Prompts 是 MCP 中最被低估的能力——它们定义"怎么提问"而不是"有什么工具"。适合标准化的任务模板：</p>
+
+<pre><code>@server.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    return [
+        Prompt(
+            name="code-review",
+            description="触发标准代码审查流程",
+            arguments=[
+                PromptArgument(
+                    name="language",
+                    description="编程语言",
+                    required=True,
+                ),
+                PromptArgument(
+                    name="focus",
+                    description="审查重点：security|performance|readability",
+                    required=False,
+                ),
+            ],
+        ),
+    ]
+
+@server.get_prompt()
+async def get_prompt(
+    name: str, arguments: dict | None
+) -> GetPromptResult:
+
+    if name == "code-review":
+        lang = arguments.get("language", "Python")
+        focus = arguments.get("focus", "all")
+
+        return GetPromptResult(
+            description=f"Code review ({lang}, focus: {focus})",
+            messages=[
+                PromptMessage(
+                    role="user",
+                    content=TextContent(
+                        type="text",
+                        text=f"""请审查以下 {lang} 代码。重点：{focus}。
+
+审查清单：
+1. 逻辑错误和 Bug
+2. 安全漏洞
+3. {"性能瓶颈" if focus in ("performance","all") else ""}
+4. {"可读性和命名" if focus in ("readability","all") else ""}
+
+给出结构化的审查报告。"""
+                    ),
+                ),
+            ],
+        )
+</code></pre>
+
+<div class="callout tip">
+  <strong>Prompt vs System Prompt：</strong>MCP Prompts 是<strong>用户可见的模板</strong>——用户在 UI 中选择 "Code Review"，自动填入模板。System Prompt 是<strong>隐藏的指令</strong>。前者是固定工作流模板，后者是持久行为模式。
+</div>
+
+<h2>4. Transport 深入：stdio vs SSE 的选择</h2>
+
+<table>
+  <tr><th>场景</th><th>Transport</th><th>原因</th></tr>
+  <tr><td>本地 CLI 工具（数据库查询、文件操作）</td><td>stdio</td><td>最低延迟，天然隔离</td></tr>
+  <tr><td>团队共享的工具服务</td><td>HTTP + SSE</td><td>多人访问，中央管理</td></tr>
+  <tr><td>需要认证的外部 API 封装</td><td>HTTP + SSE + Bearer token</td><td>需要身份验证</td></tr>
+  <tr><td>多语言 MCP Server</td><td>stdio (任何语言都可以)</td><td>无需 HTTP 框架</td></tr>
+</table>
+
+<p>SSE（Server-Sent Events）用于 HTTP transport——因为 MCP 的 Server 需要主动推送通知（如 tools/list_changed），单向 HTTP 不行，需要双工通道。SSE 提供 Server → Client 推送通道，HTTP POST 提供 Client → Server 请求通道。</p>
+
+<h2>5. 面试高频追问</h2>
+<table>
+  <tr><th>问题</th><th>你的回答要点</th></tr>
+  <tr>
+    <td>"什么时候用 Resource vs Tool？"</td>
+    <td>Resource 是"可以读的数据"（被动），Tool 是"可以调用的函数"（主动）。数据库查询结果做成 Resource 还是 Tool？看场景——固定查询做成 Resource（"所有用户数"），参数化查询做成 Tool（"查用户X的订单"）。实际上很多场景两者都可，用 Tool 更灵活。</td>
+  </tr>
+  <tr>
+    <td>"Resource Template 能嵌套吗？"</td>
+    <td>MCP 协议不限制 URI 模板的复杂度，但最佳实践是平铺——一级参数化，避免多层嵌套。复杂的层级关系应该通过多个 Resource 表达。</td>
+  </tr>
+  <tr>
+    <td>"为什么用 SSE 而不是 WebSocket？"</td>
+    <td>SSE 更简单——单向推送，HTTP 兼容，不需要升级协议。MCP 的 Server → Client 通知频率很低（工具列表变了才会通知），WebSocket 的双工能力过度设计。但未来可能支持 WebSocket。</td>
+  </tr>
+</table>
+
+<h2>6. 推荐阅读</h2>
+<ul>
+  <li><a href="https://modelcontextprotocol.io/docs/concepts/resources">MCP Resources 文档</a></li>
+  <li><a href="https://modelcontextprotocol.io/docs/concepts/prompts">MCP Prompts 文档</a></li>
+  <li><a href="https://modelcontextprotocol.io/docs/concepts/transports">MCP Transports 文档</a></li>
+</ul>
+
+<div class="nav">
+  <a href="0002-mcp-server-python.html">← 第二课：MCP Server 实战</a>
+  <a href="0004-skill-development.html">第四课：Claude Code Skill 开发 →</a>
+</div>
+
+</body>
+</html>
