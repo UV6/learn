@@ -1,4 +1,4 @@
-# s03: Permission — 执行前做权限判断
+# s03: Permission — 执行前做权限判断（针对工具
 
 [中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
 
@@ -19,7 +19,7 @@ s02 的 Agent 有 5 个工具。file tools 受 `safe_path` 保护，但 bash 不
 
 ## 解决方案
 
-![Permission Overview](images/permission-overview.svg)
+![Permission Overview|697](images/permission-overview.svg)
 
 s02 的循环完全保留。唯一的变动在工具执行前插入 `check_permission()`——每个工具调用经过三道闸门，顺序固定：硬拒绝优先，软询问次之，都没命中就放行。
 
@@ -37,7 +37,7 @@ s02 的循环完全保留。唯一的变动在工具执行前插入 `check_permi
 
 ## 工作原理
 
-![Permission Pipeline](images/permission-pipeline.svg)
+![Permission Pipeline|697](images/permission-pipeline.svg)
 
 **闸门 1**：一张硬拒绝表，先查，命中就返回阻止信息。（教学示意：简单字符串匹配不是可靠安全机制，命令变体和 shell 展开可能绕过。CC 的做法见附录。）
 

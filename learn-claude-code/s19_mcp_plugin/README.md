@@ -22,7 +22,7 @@ s01 到 s18，Agent 的所有工具都是手写的——bash、read、write、ta
 
 ## 解决方案
 
-![MCP Architecture](images/mcp-architecture.svg)
+![MCP Architecture|697](images/mcp-architecture.svg)
 
 MCP（Model Context Protocol）定义了 Agent 如何发现和调用外部工具。核心概念：
 

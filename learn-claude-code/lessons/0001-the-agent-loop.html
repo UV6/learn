@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001 — Agent Loop：一个循环就够了</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>0001 — Agent Loop：一个循环就够了</h1>
+
+<div class="lesson-meta">
+  课程：<a href="../s01_agent_loop/">s01_agent_loop</a> &nbsp;|&nbsp;
+  源码：<a href="../s01_agent_loop/code.py">code.py</a> &nbsp;|&nbsp;
+  参考：<a href="../reference/glossary.html">术语表</a>
+</div>
+
+<h2>心智转换：你不是在"开发 Agent"</h2>
+
+<p>
+  在写第一行代码之前，先把一件事焊死在脑子里：
+</p>
+
+<blockquote>
+  <strong>Agency（感知、推理、行动的能力）来自模型训练，不是来自外部代码的编排。</strong>
+  模型是驾驶者，Harness 是载具。你写的是载具。
+</blockquote>
+
+<p>
+  这意味着什么？你不需要在代码里写决策树告诉模型"什么时候该读文件"、"什么时候该跑测试"。
+  模型已经知道怎么推理了。你的工作只有两件事：
+</p>
+
+<ol>
+  <li><strong>给模型手和眼睛</strong>（工具：bash、read、write、browser…）</li>
+  <li><strong>给模型一个能持续行动的循环</strong>（调用工具 → 看到结果 → 继续推理 → 调用工具 → …）</li>
+</ol>
+
+<p>
+  历史已经证明了这个模式：DeepMind 的 DQN（2013）、OpenAI Five（2019）、AlphaStar（2019）、腾讯绝悟（2019）、Claude Code（2024）——
+  每一个里程碑都是<strong>模型提供智能 + Harness 提供环境</strong>。模型在变，循环不变。
+</p>
+
+<h2>核心循环：不到 30 行</h2>
+
+<p>把 agent 的工作过程翻译成人话：</p>
+
+<ol class="step-list">
+  <li>用户发来一个问题</li>
+  <li>把问题 + 可用工具列表发给模型</li>
+  <li>模型说"我要用工具 X"还是"我做完了"？</li>
+  <li>如果要用工具 → 执行 → 把结果喂回去 → 回到第 2 步</li>
+  <li>如果说做完了 → 退出循环，返回结果</li>
+</ol>
+
+<p>翻译成代码：</p>
+
+<pre><code>def agent_loop(messages):
+    while True:
+        # 1. 把消息和工具定义一起发给 LLM
+        response = client.messages.create(
+            model=MODEL, system=SYSTEM,
+            messages=messages, tools=TOOLS,
+            max_tokens=8000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+
+        # 2. 模型不调工具 → 结束
+        if response.stop_reason != "tool_use":
+            return
+
+        # 3. 执行模型要求的工具，收集结果
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                output = TOOL_HANDLERS[block.name](**block.input)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": output,
+                })
+
+        # 4. 把工具结果喂回去，继续循环
+        messages.append({"role": "user", "content": results})</code></pre>
+
+<div class="callout">
+  <strong>关键洞察：</strong>Claude Code 的 <code>src/query.ts</code> 有 1729 行。
+  它的核心就是上面这 30 行 <code>while True</code>。剩下的 1699 行全是保护机制：token 超限恢复、
+  上下文压缩、流式工具执行、hook 中断处理、费用控制……但<strong>循环本身不变</strong>。
+</div>
+
+<p>整个循环只有两个信号驱动：</p>
+
+<table>
+  <tr><th>信号</th><th>含义</th><th>循环动作</th></tr>
+  <tr>
+    <td><code>stop_reason == "tool_use"</code></td>
+    <td>模型举手说"我要用工具"</td>
+    <td>执行工具 → 结果喂回去 → 继续</td>
+  </tr>
+  <tr>
+    <td><code>stop_reason != "tool_use"</code></td>
+    <td>模型说"我做完了"</td>
+    <td>退出循环</td>
+  </tr>
+</table>
+
+<h2>为什么 bash 一个工具就够了</h2>
+
+<p>
+  s01 只给模型一个工具：<code>bash</code>。模型可以执行任意 shell 命令。
+  读文件？<code>cat file.py</code>。写文件？<code>echo "..." > file.py</code>。找文件？<code>find . -name "*.py"</code>。
+</p>
+
+<p>
+  一个工具 + 一个循环 = 一个能工作的 Agent。粗糙，但完整。后面的 19 个章节都在这个循环上叠加机制，
+  循环本身从不改变。
+</p>
+
+<div class="loop-diagram">
+    +----------+      +-------+      +---------+
+    |   User   | ---> |  LLM  | ---> |  Tool   |
+    |  prompt  |      |       |      | execute |
+    +----------+      +---+---+      +----+----+
+                          ^               |
+                          |   tool_result |
+                          +---------------+
+                          (loop continues)
+</div>
+
+<h2>跟你的 TypeScript Agent 有什么关系</h2>
+
+<p>你在用 TypeScript 开发 coding agent。这个循环翻译成 TS 几乎一个字不改：</p>
+
+<pre><code>async function agentLoop(messages: Message[]): Promise&lt;void&gt; {
+  while (true) {
+    const response = await client.messages.create({
+      model: MODEL,
+      system: SYSTEM,
+      messages,
+      tools: TOOLS,
+      max_tokens: 8000,
+    });
+
+    messages.push({ role: "assistant", content: response.content });
+
+    if (response.stop_reason !== "tool_use") return;
+
+    const results: ToolResult[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        const output = await toolHandlers[block.name](block.input);
+        results.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: output,
+        });
+      }
+    }
+
+    messages.push({ role: "user", content: results });
+  }
+}</code></pre>
+
+<p>这 20 行就是你整个 agent 的骨架。后面每一章加一个机制，改的是 <code>TOOLS</code>、
+加的是 <code>TOOL_HANDLERS</code> 的条目、或是在工具执行前后插逻辑，但 <code>while (true)</code> 永远不变。</p>
+
+<h2>检验理解</h2>
+
+<div class="quiz" id="q1">
+  <div class="question">1. 在 agent loop 中，谁决定"何时调用工具、调用哪个工具"？</div>
+  <div class="options">
+    <div class="option" data-value="a">Harness 代码中的规则引擎</div>
+    <div class="option" data-value="b">模型本身，基于训练学到的推理能力</div>
+    <div class="option" data-value="c">用户每次手动指定</div>
+  </div>
+  <button onclick="check('q1', 'b')">确认</button>
+  <div class="feedback" id="q1-feedback"></div>
+</div>
+
+<div class="quiz" id="q2">
+  <div class="question">2. stop_reason 不等于 "tool_use" 时，循环应该怎么做？</div>
+  <div class="options">
+    <div class="option" data-value="a">重试一次，可能是网络错误</div>
+    <div class="option" data-value="b">退出循环，模型已经完成任务</div>
+    <div class="option" data-value="c">强制让模型调用工具</div>
+  </div>
+  <button onclick="check('q2', 'b')">确认</button>
+  <div class="feedback" id="q2-feedback"></div>
+</div>
+
+<div class="quiz" id="q3">
+  <div class="question">3. Claude Code 的 query.ts（1729 行）和 s01 的 code.py（30 行）是什么关系？</div>
+  <div class="options">
+    <div class="option" data-value="a">完全不同的架构，没有可比性</div>
+    <div class="option" data-value="b">核心循环相同，多出来的 1699 行是保护机制</div>
+    <div class="option" data-value="c">query.ts 用了一个更复杂的循环算法</div>
+  </div>
+  <button onclick="check('q3', 'b')">确认</button>
+  <div class="feedback" id="q3-feedback"></div>
+</div>
+
+<h2>动手：跑起来</h2>
+
+<pre><code>cd /Users/liuwei/learn/learn-claude-code
+pip install -r requirements.txt
+cp .env.example .env
+# 编辑 .env，填入 ANTHROPIC_API_KEY
+python s01_agent_loop/code.py</code></pre>
+
+<p>试试这三个 prompt，观察重点：模型什么时候调用工具？什么时候不调用？</p>
+
+<ol>
+  <li><code>Create a file called hello.py that prints "Hello, World!"</code></li>
+  <li><code>List all Python files in this directory</code></li>
+  <li><code>What is the current git branch?</code></li>
+</ol>
+
+<div class="callout success">
+  <strong>检索练习（做完了再看）：</strong>不看书，在纸上默写 agent loop 的 5 个步骤。
+  然后对比上面的步骤列表，检查有没有遗漏。
+</div>
+
+<h2>接下来</h2>
+
+<p>
+  现在模型只有 bash 一个工具。读文件要 <code>cat</code>，写文件要 <code>echo ... &gt;</code>，
+  找文件要 <code>find</code>。又丑又容易出错。
+</p>
+
+<p>
+  <a href="0002-tool-dispatch.html">→ 0002: Tool Dispatch</a> —
+  给模型 5 个真正的专用工具，循环完全不变，只加一个 dispatch map。
+</p>
+
+<h2>推荐阅读</h2>
+
+<ul>
+  <li><a href="../s01_agent_loop/README.md">s01 README（完整版，含 CC 源码对照）</a></li>
+  <li><a href="https://docs.anthropic.com/en/docs/build-with-claude/tool-use">Anthropic Tool Use 官方文档</a></li>
+  <li>DeepMind DQN 论文: <a href="https://www.nature.com/articles/nature14236">Human-level control through deep reinforcement learning, <em>Nature</em> 2015</a></li>
+</ul>
+
+<div class="lesson-nav">
+  <span></span>
+  <a href="0002-tool-dispatch.html">0002: Tool Dispatch →</a>
+</div>
+
+<p style="margin-top: 2rem; font-size: 0.85rem; color: var(--text-muted);">
+  有疑问？直接问你的 AI 教师。你可以问："Agent loop 中如果模型同时调了两个工具怎么办？"
+  或 "stop_reason 在流式响应中可靠吗？"
+</p>
+
+<script>
+function check(quizId, correctValue) {
+  const quiz = document.getElementById(quizId);
+  const selected = quiz.querySelector('.option.selected');
+  const feedback = document.getElementById(quizId + '-feedback');
+  const button = quiz.querySelector('button');
+
+  if (!selected) return;
+
+  const isCorrect = selected.dataset.value === correctValue;
+  feedback.className = 'feedback show ' + (isCorrect ? 'correct' : 'wrong');
+  feedback.textContent = isCorrect
+    ? '✓ 正确！'
+    : '✗ 不对。再看一遍上面的循环逻辑。';
+
+  button.disabled = true;
+  quiz.querySelectorAll('.option').forEach(opt => {
+    if (opt.dataset.value === correctValue) opt.classList.add('correct');
+    if (opt === selected && !isCorrect) opt.classList.add('wrong');
+    opt.style.pointerEvents = 'none';
+  });
+}
+
+document.querySelectorAll('.quiz .option').forEach(opt => {
+  opt.addEventListener('click', function() {
+    const quiz = this.closest('.quiz');
+    quiz.querySelectorAll('.option').forEach(o => o.classList.remove('selected'));
+    this.classList.add('selected');
+  });
+});
+</script>
+
+</body>
+</html>

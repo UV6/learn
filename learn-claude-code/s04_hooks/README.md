@@ -36,7 +36,7 @@ def agent_loop(messages):
 
 ## 解决方案
 
-![Hooks Overview](images/hooks-overview.svg)
+![Hooks Overview|697](images/hooks-overview.svg)
 
 s03 的循环和权限逻辑完全保留。唯一的变动是把 `check_permission()` 从循环体内移到了 hook 上，循环不再直接调用任何检查函数，改为 `trigger_hooks("PreToolUse", block)`，由注册表决定跑什么。
 
@@ -185,14 +185,14 @@ for block in response.content:
 
 ## 相对 s03 的变更
 
-| 组件 | 之前 (s03) | 之后 (s04) |
-|------|-----------|-----------|
-| 扩展方式 | check_permission() 硬编码在循环里 | HOOKS 注册表 + trigger_hooks() |
-| 新函数 | — | register_hook, trigger_hooks |
-| hook 回调 | — | context_inject_hook, permission_hook, log_hook, large_output_hook, summary_hook |
-| 循环 | 直接调用 check_permission() | 调用 trigger_hooks("PreToolUse", ...) |
-| 退出控制 | 无 | trigger_hooks("Stop", ...) 可阻止退出 |
-| 输入拦截 | 无 | trigger_hooks("UserPromptSubmit", ...) 可注入上下文 |
+| 组件      | 之前 (s03)                   | 之后 (s04)                                                                        |
+| ------- | -------------------------- | ------------------------------------------------------------------------------- |
+| 扩展方式    | check_permission() 硬编码在循环里 | HOOKS 注册表 + trigger_hooks()                                                     |
+| 新函数     | —                          | register_hook, trigger_hooks                                                    |
+| hook 回调 | —                          | context_inject_hook, permission_hook, log_hook, large_output_hook, summary_hook |
+| 循环      | 直接调用 check_permission()    | 调用 trigger_hooks("PreToolUse", ...)                                             |
+| 退出控制    | 无                          | trigger_hooks("Stop", ...) 可阻止退出                                                |
+| 输入拦截    | 无                          | trigger_hooks("UserPromptSubmit", ...) 可注入上下文                                   |
 
 ---
 

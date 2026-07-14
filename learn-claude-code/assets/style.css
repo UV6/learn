@@ -1,0 +1,254 @@
+/* Shared stylesheet for Learn Claude Code lessons */
+/* Inspired by Tufte's design principles: clean, readable, information-dense */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600&display=swap');
+
+:root {
+  --text: #1a1a1a;
+  --text-muted: #555;
+  --bg: #fefefe;
+  --accent: #1976D2;
+  --accent-light: #E3F2FD;
+  --border: #e0e0e0;
+  --code-bg: #f5f5f5;
+  --success: #2e7d32;
+  --warning: #e65100;
+  --danger: #c62828;
+  --max-width: 720px;
+  --font-body: 'Inter', 'Noto Sans SC', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--bg);
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 { font-size: 2rem; font-weight: 600; margin: 0 0 0.3rem; line-height: 1.2; }
+h2 { font-size: 1.35rem; font-weight: 600; margin: 2.5rem 0 0.75rem; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }
+h3 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.5rem; }
+
+p { margin: 0 0 1rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Code */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--code-bg);
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  margin: 0 0 1.2rem;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* Blockquote */
+blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.5rem 0 0.5rem 1.2rem;
+  margin: 0 0 1.2rem;
+  color: var(--text-muted);
+  background: var(--accent-light);
+  border-radius: 0 4px 4px 0;
+}
+
+blockquote p:last-child { margin-bottom: 0; }
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.2rem;
+  font-size: 0.92em;
+}
+
+th, td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+  background: var(--code-bg);
+}
+
+/* Lists */
+ul, ol { margin: 0 0 1rem 1.5rem; }
+li { margin-bottom: 0.3rem; }
+
+/* Meta bar */
+.lesson-meta {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lesson-meta a { color: var(--accent); }
+
+/* Navigation */
+.lesson-nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+/* Callout boxes */
+.callout {
+  border-left: 4px solid var(--accent);
+  background: var(--accent-light);
+  padding: 0.8rem 1rem;
+  margin: 0 0 1.2rem;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.92em;
+}
+
+.callout.warning {
+  border-left-color: var(--warning);
+  background: #fff3e0;
+}
+
+.callout.success {
+  border-left-color: var(--success);
+  background: #e8f5e9;
+}
+
+.callout.danger {
+  border-left-color: var(--danger);
+  background: #ffebee;
+}
+
+/* Sidenote / margin note (Tufte-inspired) */
+.sidenote {
+  float: right;
+  clear: right;
+  width: 200px;
+  margin-right: -230px;
+  margin-top: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+@media (max-width: 1020px) {
+  .sidenote {
+    float: none;
+    width: auto;
+    margin: 0 0 1rem;
+    display: block;
+  }
+}
+
+/* Quiz */
+.quiz { margin: 1.5rem 0; }
+.quiz .question { font-weight: 500; margin-bottom: 0.75rem; }
+.quiz .options { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem; }
+.quiz .option {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.quiz .option:hover { background: var(--accent-light); }
+.quiz .option.selected { border-color: var(--accent); background: var(--accent-light); }
+.quiz .option.correct { border-color: var(--success); background: #e8f5e9; }
+.quiz .option.wrong { border-color: var(--danger); background: #ffebee; }
+.quiz .feedback { font-size: 0.9rem; padding: 0.5rem 0.75rem; border-radius: 6px; display: none; }
+.quiz .feedback.show { display: block; }
+.quiz .feedback.correct { background: #e8f5e9; color: var(--success); }
+.quiz .feedback.wrong { background: #ffebee; color: var(--danger); }
+.quiz button {
+  padding: 0.4rem 1rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.quiz button:hover { opacity: 0.9; }
+.quiz button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Agent loop diagram */
+.loop-diagram {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.5rem;
+  margin: 0 0 1.2rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Step counter */
+.step-list {
+  counter-reset: step;
+  list-style: none;
+  margin-left: 0;
+}
+
+.step-list li {
+  counter-increment: step;
+  margin-bottom: 0.75rem;
+  padding-left: 2.5rem;
+  position: relative;
+}
+
+.step-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  background: var(--accent);
+  color: white;
+  border-radius: 50%;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.6rem;
+}
+
+/* Print */
+@media print {
+  body { font-size: 12pt; padding: 0; }
+  .lesson-nav, .quiz button { display: none; }
+  a { color: var(--text); }
+}

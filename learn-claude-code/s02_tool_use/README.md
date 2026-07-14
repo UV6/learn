@@ -19,7 +19,7 @@ s01 的 Agent 只有一个 bash 工具。读文件要 `cat`，写文件要 `echo
 
 ## 全局视角：工具分发
 
-![Tool Dispatch](images/tool-dispatch.svg)
+![Tool Dispatch|697](images/tool-dispatch.svg)
 
 s01 的循环完全保留（LLM 调用、stop_reason 判断、消息追加）。唯一的变动在工具执行那 1 行：`run_bash()` 替换为 `TOOL_HANDLERS[block.name]()` 查表分发。
 
@@ -154,7 +154,7 @@ python s02_tool_use/code.py
 
 现在 Agent 有 5 个专用工具。file tools 受 `safe_path` 保护，但 bash 不受限制，`rm -rf /` 还是能跑。
 
-s03 Permission → 在工具执行之前加一道门：这个操作安全吗？需要用户批准吗？
+s03 Permis sion → 在工具执行之前加一道门：这个操作安全吗？需要用户批准吗？
 
 <details>
 <summary>深入 CC 源码</summary>

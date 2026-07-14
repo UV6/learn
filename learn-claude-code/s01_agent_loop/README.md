@@ -23,7 +23,7 @@
 
 ## 解决方案
 
-![Agent Loop](images/agent-loop.svg)
+![Agent Loop|697](images/agent-loop.svg)
 
 一个 `while True` 循环，模型调用工具就继续，不调用就停。整个过程只有两个信号：
 

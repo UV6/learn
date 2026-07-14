@@ -4,7 +4,7 @@
 
 s01 → ... → s08 → s09 → `s10` → [s11](../s11_error_recovery/) → s12 → ... → s20
 > *"prompt 是组装出来的, 不是写死的"* — 分段 + 按需拼接 + 缓存。
->
+> 
 > **Harness 层**: 提示 — 运行时组装, 不硬编码。
 
 ---
@@ -36,13 +36,13 @@ SYSTEM = (
 2. **修改一处可能影响全局**，加一段工具描述可能跟前面的指令冲突
 3. **每次请求都带全部内容**，即使当前对话用不到某些段落也浪费 token
 
-System prompt 应该是运行时根据当前状态组装的配置：哪些工具启用、哪些上下文可见、哪些记忆相关、哪些内容必须保持稳定以命中 prompt cache。
+System prompt 应该是**运行时根据当前状态组装的配置**：哪些工具启用、哪些上下文可见、哪些记忆相关、哪些内容必须保持稳定以命中 prompt cache。
 
 ---
 
 ## 解决方案
 
-![System Prompt Overview](images/system-prompt-overview.svg)
+![System Prompt Overview|697](images/system-prompt-overview.svg)
 
 s10 聚焦 prompt 组装机制。以 s08-s09 的能力为背景，但不重复实现压缩和记忆系统。核心变动：把硬编码的 `SYSTEM` 拆成独立段落（section），运行时根据真实状态按需拼接，缓存结果避免重复组装。
 

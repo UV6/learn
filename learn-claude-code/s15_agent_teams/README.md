@@ -19,7 +19,7 @@ s06 的子 Agent 是临时工，叫来干一件事就走了。但有些任务需
 
 ## 解决方案
 
-![Agent Teams Overview](images/agent-teams-overview.svg)
+![Agent Teams Overview|697](images/agent-teams-overview.svg)
 
 教学代码沿用 S14 的能力（prompt 组装、任务系统、后台执行、cron 调度）。为了聚焦团队机制，省略了完整错误恢复、记忆和技能系统。新增三样：**MessageBus**（文件收件箱）、**spawn_teammate_thread**（启动队友线程）、**inbox 注入**（Lead 接收队友消息并注入 history）。
 

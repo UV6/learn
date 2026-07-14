@@ -19,7 +19,7 @@ s13 让 Agent 能后台执行慢操作，但所有操作仍然是你手动触发
 
 ## 解决方案
 
-![Cron Scheduler Overview](images/cron-scheduler-overview.svg)
+![Cron Scheduler Overview|697](images/cron-scheduler-overview.svg)
 
 教学代码沿用 S13 的简化任务系统、后台执行和 prompt 组装；为了聚焦调度器，省略完整错误恢复、记忆和技能系统。新增：独立的 cron 调度线程，每秒检查一次，时间到了把任务塞进 `cron_queue`；再由 queue processor 在 Agent 空闲时自动交付。
 
