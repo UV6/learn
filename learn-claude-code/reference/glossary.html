@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness 术语表</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  dt { font-weight: 600; margin-top: 1rem; font-family: var(--font-mono); font-size: 0.95rem; }
+  dd { margin-left: 1.5rem; margin-bottom: 0.75rem; }
+  .tag {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 0.1em 0.5em;
+    border-radius: 3px;
+    margin-left: 0.4em;
+    vertical-align: middle;
+  }
+  .tag.core { background: #e3f2fd; color: #1976D2; }
+  .tag.mechanism { background: #e8f5e9; color: #2e7d32; }
+  .tag.concept { background: #fff3e0; color: #e65100; }
+</style>
+</head>
+<body>
+
+<h1>Agent Harness 术语表</h1>
+
+<div class="lesson-meta">
+  所有课程共用的术语定义。随课程进展逐步扩充。
+</div>
+
+<dl>
+
+<dt>Agency <span class="tag core">核心概念</span></dt>
+<dd>感知环境、推理目标、采取行动的能力。来自模型训练（数十亿次梯度更新在行动序列数据上的结果），不是来自外部代码编排。Agency 是学出来的，不是编出来的。</dd>
+
+<dt>Harness <span class="tag core">核心概念</span></dt>
+<dd>为 agent 模型提供可操作环境的一切代码和基础设施。Harness = Tools + Knowledge + Observation + Action Interfaces + Permissions。模型做决策，Harness 执行。模型是驾驶者，Harness 是载具。</dd>
+
+<dt>Agent Loop <span class="tag core">核心概念</span></dt>
+<dd>Agent 的核心运行循环：<code>while stop_reason == "tool_use"</code> → 执行工具 → 结果喂回模型 → 继续推理。这个循环是每个 AI agent 的骨架，无论领域如何变化，循环本身不变。见 <a href="../lessons/0001-the-agent-loop.html">Lesson 0001</a>。</dd>
+
+<dt>Tool <span class="tag mechanism">机制</span></dt>
+<dd>模型在环境中可以采取的一个行动。在 coding agent 中：bash、read_file、write_file、edit_file、glob、browser。每个工具是一个原子化的、可组合的行动单元。见 s02。</dd>
+
+<dt>Tool Dispatch <span class="tag mechanism">机制</span></dt>
+<dd>将模型的工具调用请求路由到对应处理函数的机制。通过 <code>TOOL_HANDLERS</code> 字典/map 实现查表分发。加新工具只需要注册一个新的 handler，循环代码完全不变。见 s02。</dd>
+
+<dt>stop_reason <span class="tag mechanism">机制</span></dt>
+<dd>LLM API 响应中的一个字段，表示模型为什么停止生成。值为 <code>"tool_use"</code> 表示模型想调用工具（循环继续），其他值（如 <code>"end_turn"</code>）表示模型已完成任务（循环退出）。</dd>
+
+<dt>messages[] <span class="tag mechanism">机制</span></dt>
+<dd>Agent loop 中累积的消息数组。包含 user 消息、assistant 响应（含 tool_use 块）、tool_result 消息。这是模型的"上下文"——它看到的一切。</dd>
+
+<dt>Permission Pipeline <span class="tag mechanism">机制</span></dt>
+<dd>工具执行前的三道闸门：1) 拒绝列表（永远禁止的操作），2) 规则匹配（需要审批的操作），3) 用户审批（暂停等待确认）。三道都没命中 → 直接执行。见 s03。</dd>
+
+<dt>Hook <span class="tag mechanism">机制</span></dt>
+<dd>挂在工具执行前后的扩展插口（PreToolUse / PostToolUse），不改主循环也能添加横切逻辑。见 s04。</dd>
+
+<dt>TodoWrite <span class="tag mechanism">机制</span></dt>
+<dd>让模型在执行前先列出计划步骤的工具。先计划后执行，显著提高复杂任务的完成率。见 s05。</dd>
+
+<dt>Subagent <span class="tag mechanism">机制</span></dt>
+<dd>派生子 agent 处理子任务，每个子 agent 有自己干净的 <code>messages[]</code>，只把最终结果带回主 agent。防止上下文噪声泄露，是模块化 agent 系统的基础。见 s06。</dd>
+
+<dt>Context Compact <span class="tag mechanism">机制</span></dt>
+<dd>四层压缩策略（snip / micro / budget / auto），在上下文窗口将要溢出前腾出空间。便宜的压缩先跑，贵的后跑。见 s08。</dd>
+
+<dt>Context Window <span class="tag concept">概念</span></dt>
+<dd>LLM 一次能"看到"的最大 token 数量。超出窗口的内容会被截断。Harness 的核心挑战之一就是在有限窗口内管理无限增长的对话历史。</dd>
+
+<dt>Prompt Water Pipe Worker <span class="tag concept">概念</span></dt>
+<dd>（提示词水管工）讽刺用语。指那些试图通过堆叠 if-else 分支、节点图、硬编码路由逻辑来"构建 Agent"的人，把 LLM 当成美化了的文本补全节点。Harness 工程师的对立面。</dd>
+
+</dl>
+
+<h2>课程章节速查</h2>
+
+<table>
+  <tr><th>章节</th><th>主题</th><th>关键术语</th></tr>
+  <tr><td>s01</td><td>Agent Loop</td><td><code>messages</code>, <code>while True</code>, <code>stop_reason</code></td></tr>
+  <tr><td>s02</td><td>Tool Use</td><td><code>TOOL_HANDLERS</code>, dispatch map, 并发</td></tr>
+  <tr><td>s03</td><td>Permission</td><td><code>PermissionRule</code>, 审批管线</td></tr>
+  <tr><td>s04</td><td>Hooks</td><td><code>PreToolUse</code>, <code>PostToolUse</code>, 扩展点</td></tr>
+  <tr><td>s05</td><td>TodoWrite</td><td><code>TodoItem</code>, 先计划后执行</td></tr>
+  <tr><td>s06</td><td>Subagent</td><td>fresh <code>messages[]</code>, 上下文隔离</td></tr>
+  <tr><td>s07</td><td>Skill Loading</td><td><code>SkillManifest</code>, 按需注入</td></tr>
+  <tr><td>s08</td><td>Context Compact</td><td>snip / micro / budget / auto</td></tr>
+  <tr><td>s09</td><td>Memory</td><td>selection / extraction / consolidation</td></tr>
+  <tr><td>s10</td><td>System Prompt</td><td>运行时组装, 分段拼接</td></tr>
+  <tr><td>s11</td><td>Error Recovery</td><td>token 升级, fallback 模型, 重试策略</td></tr>
+  <tr><td>s12</td><td>Task System</td><td><code>TaskRecord</code>, <code>blockedBy</code>, 磁盘持久化</td></tr>
+  <tr><td>s13</td><td>Background Tasks</td><td>线程执行, 通知队列</td></tr>
+  <tr><td>s14</td><td>Cron Scheduler</td><td>持久化调度, 会话级触发</td></tr>
+  <tr><td>s15</td><td>Agent Teams</td><td><code>MessageBus</code>, 收件箱, 权限冒泡</td></tr>
+  <tr><td>s16</td><td>Team Protocols</td><td>关机握手, 计划审批</td></tr>
+  <tr><td>s17</td><td>Autonomous Agents</td><td>空闲循环, 自动认领</td></tr>
+  <tr><td>s18</td><td>Worktree Isolation</td><td><code>WorktreeRecord</code>, 任务-目录绑定</td></tr>
+  <tr><td>s19</td><td>MCP Plugin</td><td>多传输, 通道路由, 工具池组装</td></tr>
+  <tr><td>s20</td><td>Comprehensive Agent</td><td>全部机制归到一个循环</td></tr>
+</table>
+
+<div class="lesson-nav">
+  <a href="../lessons/0001-the-agent-loop.html">← 0001: Agent Loop</a>
+  <a href="../lessons/0002-tool-dispatch.html">0002: Tool Dispatch →</a>
+</div>
+
+</body>
+</html>
