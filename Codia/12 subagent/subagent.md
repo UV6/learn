@@ -212,6 +212,17 @@ function runToCompletion(agent, task) -> string:
 
 加上 Fork 路径**无条件后台运行**，所有后台任务走统一的 `TaskManager` 生命周期。完成后通过 `<task-notification>` 注入对话，不打断主流程。
 
+后台任务没有给用户做 slash command，而是通过 4 个内置工具暴露给 Agent：
+
+| 工具 | 作用 |
+|------|------|
+| `TaskList` | 列出当前所有后台任务及状态 |
+| `TaskGet` | 查询某个任务的状态和结果 |
+| `TaskCreate` | 创建新任务（主要给 Hook 用） |
+| `TaskUpdate` | 更新任务状态 |
+
+用户想知道后台任务跑得怎么样，直接问主 Agent，它会自己调 `TaskList` 或 `TaskGet` 查，再用自然语言告诉你。
+
 后台 Agent 有固定工具白名单（`ASYNC_AGENT_ALLOWED_TOOLS`）：只能读写文件、搜索、Bash、Web 等基础操作，不能用 Agent 工具（不能再 spawn）。
 
 ---
