@@ -1,6 +1,7 @@
 {
 	"nodes":[
-		{"id":"6b4eb76337ab0b32","x":-340,"y":-300,"width":400,"height":400,"type":"file","file":"Codia/17 沙箱机制/沙箱机制.md"}
+		{"id":"972660fd9e7ac638","x":-316,"y":-440,"width":356,"height":120,"type":"text","text":"Beauty And A Beat\nThe Other Side of the Dream - EsoLifeMusic\n一天一天"},
+		{"id":"6b4eb76337ab0b32","type":"file","file":"Codia/17 沙箱机制/沙箱机制.md","x":-420,"y":-80,"width":400,"height":400}
 	],
 	"edges":[]
 }
